@@ -1,5 +1,8 @@
 use clap::Parser;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use zip::{write::FileOptions, ZipArchive, ZipWriter};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -23,8 +26,6 @@ fn main() {
     }
 
     println!("Done");
-
-    
 }
 
 fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
@@ -45,5 +46,33 @@ fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
 }
 
 fn fix(filename: &str, output_filename: &Path) {
+    let file = File::open(filename).expect("Failed to open EPUB file");
+    let mut archive = ZipArchive::new(file).expect("Failed to read ZIP archive");
 
+    let output_file = File::create(output_filename).expect("Failed to create output EPUB file");
+    let mut output_zip = ZipWriter::new(output_file);
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .expect("Failed to access file in ZIP archive");
+        let file_name = file.name().to_string();
+
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)
+            .expect("Failed to read file content");
+
+        let options = FileOptions::default()
+            .compression_method(file.compression())
+            .unix_permissions(file.unix_mode().unwrap_or(0o755));
+
+        output_zip
+            .start_file(file_name, options)
+            .expect("Failed to start file in ZIP");
+        output_zip
+            .write_all(&content)
+            .expect("Failed to write file content");
+    }
+
+    output_zip.finish().expect("Failed to finalize ZIP archive");
 }

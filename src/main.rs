@@ -1,4 +1,5 @@
 use clap::Parser;
+use scraper::{Html, Selector};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -61,6 +62,7 @@ fn fix(filename: &str, output_filename: &Path) {
         let mut content = Vec::new();
         file.read_to_end(&mut content)
             .expect("Failed to read file content");
+        let modified_content = process_content(&content);
 
         let options = FileOptions::default()
             .compression_method(file.compression())
@@ -75,4 +77,18 @@ fn fix(filename: &str, output_filename: &Path) {
     }
 
     output_zip.finish().expect("Failed to finalize ZIP archive");
+}
+
+fn process_content(content: &[u8]) -> Vec<u8> {
+    content.to_vec()
+}
+
+fn process_html_content(content: &[u8]) -> Vec<u8> {
+    let content_str = String::from_utf8_lossy(content);
+    let document = Html::parse_document(&content_str);
+    let body_selector = Selector::parse("body").unwrap();
+    let body = document.select(&body_selector).next();
+
+    let mut new_content = content_str.to_string();
+    new_content.into_bytes()
 }

@@ -332,6 +332,7 @@ name = "fixepub"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "html5ever",
  "scraper",
  "zip",
 ]

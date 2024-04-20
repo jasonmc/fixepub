@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use xmltree::{Element, XMLNode};
+use xmltree::{Element, EmitterConfig, XMLNode};
 use zip::{write::FileOptions, ZipArchive, ZipWriter};
 
 mod encoding_matcher;
@@ -194,8 +194,8 @@ fn fix_encoding(file_path: &str, content: &[u8]) -> Vec<u8> {
             Ok((_, false)) => {
                 println!("encoding mismatch: {}", trimmed_html);
                 return format!("{}\n{}", encoding, trimmed_html).into_bytes();
-            },
-            Err(_) =>  panic!("bad xml parser")
+            }
+            Err(_) => panic!("bad xml parser"),
         }
     }
     content.to_vec()
@@ -228,7 +228,6 @@ fn fix_stray_img(file_path: &str, content: &[u8]) -> Vec<u8> {
         return document.html().into_bytes();
     }
     content.to_vec()
-    
 }
 
 fn get_opf_filename(content: &[u8]) -> String {
@@ -258,18 +257,27 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: String) -> Vec<u
         .ok_or("No metadata in OPF file")
         .unwrap();
 
-    fix_language(metadata);
+    let changed = fix_language(metadata);
+
+    if !changed {
+        return content.to_vec();
+    }
+
+    let config = EmitterConfig::new()
+        //.line_separator("\r\n")
+        .perform_indent(true)
+        .normalize_empty_elements(false);
 
     // Update file with new OPF content if language was changed
     let mut buf = BufWriter::new(Vec::new());
-    opf.write(&mut buf)
+    opf.write_with_config(&mut buf, config)
         .map_err(|_| "Error serializing OPF file")
         .unwrap();
 
     buf.into_inner().unwrap()
 }
 
-fn fix_language(metadata: &mut Element) {
+fn fix_language(metadata: &mut Element) -> bool {
     let allowed_languages = vec![
         "af", "gsw", "ar", "eu", "nb", "br", "ca", "zh", "kw", "co", "da", "nl", "stq", "en", "fi",
         "fr", "fy", "gl", "de", "gu", "hi", "is", "ga", "it", "ja", "lb", "mr", "ml", "gv", "frr",
@@ -284,11 +292,11 @@ fn fix_language(metadata: &mut Element) {
 
     // Check if 'dc:language' exists and extract the language, if present
     let mut language_tag = metadata.get_mut_child("language");
-    let mut language = if let Some(lt) = language_tag.as_mut() {
-        lt.get_text().unwrap_or_default().to_string()
-    } else {
-        "en".to_string() // Default language if not present
-    };
+
+    let mut language = language_tag
+        .as_mut()
+        .and_then(|lt| lt.get_text().map(String::from))
+        .unwrap_or_default();
 
     // Validate the language and possibly reset it to a default if not allowed
     if !allowed_languages.contains(language.as_str()) {
@@ -297,6 +305,8 @@ fn fix_language(metadata: &mut Element) {
             language
         );
         language = "en".to_string(); // Replace this with actual user input in a real scenario
+    } else {
+        return false;
     }
 
     // Add a new 'dc:language' element if it doesn't exist
@@ -314,6 +324,7 @@ fn fix_language(metadata: &mut Element) {
         t.children.clear();
         t.children.push(XMLNode::Text(language.clone()));
     }
+    return true;
 }
 
 // fn test_xml2() {

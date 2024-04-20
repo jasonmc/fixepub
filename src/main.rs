@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use xmltree::{Element, EmitterConfig, XMLNode};
 use zip::{write::FileOptions, ZipArchive, ZipWriter};
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 
 mod encoding_matcher;
 #[derive(Parser, Debug)]
@@ -27,11 +28,9 @@ fn main() {
         let new_path = change_file_stem(path, &new_stem);
         let np = new_path.as_path();
 
-        println!("Fixing {} as {}", f, np.to_string_lossy());
+        println!("{} ⟶ {}", f, np.to_string_lossy());
         fix(&f, np)
     }
-
-    println!("Done");
 }
 
 fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
@@ -101,7 +100,9 @@ fn fix(filename: &str, output_filename: &Path) {
         }
     }
 
-    println!("OPF path: {}", opf_path);
+    let pb = ProgressBar::new(archive.len() as u64);
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")
+        .unwrap());
 
     for i in 0..archive.len() {
         let mut file = archive
@@ -129,9 +130,11 @@ fn fix(filename: &str, output_filename: &Path) {
         output_zip
             .write_all(&modified_content)
             .expect("Failed to write file content");
+        pb.inc(1);
     }
 
     output_zip.finish().expect("Failed to finalize ZIP archive");
+    pb.finish_with_message("done");
 }
 
 fn process_file(
@@ -140,7 +143,7 @@ fn process_file(
     body_id_list: Vec<(String, String)>,
     opf_path: String,
 ) -> Vec<u8> {
-    println!("processing {}", file_path);
+    //println!("processing {}", file_path);
 
     let a = fix_body_id_link(file_path, content, body_id_list);
     let b = fix_book_language(file_path, a.as_slice(), opf_path);

@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use xmltree::{Element, EmitterConfig, XMLNode};
 use zip::{write::FileOptions, ZipArchive, ZipWriter};
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 
 mod encoding_matcher;
 #[derive(Parser, Debug)]
@@ -194,11 +194,9 @@ fn fix_encoding(file_path: &str, content: &[u8]) -> Vec<u8> {
 
         match encoding_matcher::is_xml_declaration(trimmed_html) {
             Ok((_, true)) => (),
-            Ok((_, false)) => {
-                println!("encoding mismatch: {}", trimmed_html);
+            _ => {
                 return format!("{}\n{}", encoding, trimmed_html).into_bytes();
             }
-            Err(_) => panic!("bad xml parser"),
         }
     }
     content.to_vec()
@@ -280,6 +278,10 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: String) -> Vec<u
     buf.into_inner().unwrap()
 }
 
+fn simplify_language(lang: &str) -> String {
+    lang.split('-').next().unwrap().to_lowercase()
+}
+
 fn fix_language(metadata: &mut Element) -> bool {
     let allowed_languages = vec![
         "af", "gsw", "ar", "eu", "nb", "br", "ca", "zh", "kw", "co", "da", "nl", "stq", "en", "fi",
@@ -302,7 +304,8 @@ fn fix_language(metadata: &mut Element) -> bool {
         .unwrap_or_default();
 
     // Validate the language and possibly reset it to a default if not allowed
-    if !allowed_languages.contains(language.as_str()) {
+    let s = simplify_language(language.as_str());
+    if !allowed_languages.contains(s.as_str()) {
         println!(
             "Language {} is not supported. Asking for a valid language.",
             language

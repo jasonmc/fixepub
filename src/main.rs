@@ -1,5 +1,6 @@
 use clap::Parser;
 use html5ever::tree_builder::TreeSink;
+use indicatif::{ProgressBar, ProgressStyle};
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 use std::fs::File;
@@ -8,7 +9,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use xmltree::{Element, EmitterConfig, XMLNode};
 use zip::{write::FileOptions, ZipArchive, ZipWriter};
-use indicatif::{ProgressBar, ProgressStyle};
 
 mod encoding_matcher;
 #[derive(Parser, Debug)]
@@ -40,7 +40,6 @@ fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
         new_path.push(parent);
     }
 
-    // Create the new filename by combining the new stem with the original extension
     let new_filename = match original_path.extension() {
         Some(extension) => format!("{}.{}", new_stem, extension.to_string_lossy()),
         None => new_stem.to_string(),
@@ -101,8 +100,10 @@ fn fix(filename: &str, output_filename: &Path) {
     }
 
     let pb = ProgressBar::new(archive.len() as u64);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")
-        .unwrap());
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")
+            .unwrap(),
+    );
 
     for i in 0..archive.len() {
         let mut file = archive
@@ -184,14 +185,8 @@ fn fix_encoding(file_path: &str, content: &[u8]) -> Vec<u8> {
         let encoding = r#"<?xml version="1.0" encoding="utf-8"?>"#;
         let content_str = String::from_utf8_lossy(content);
         let trimmed_html = content_str.trim_start();
+
         // Check if the beginning of the file content starts with a partial XML declaration
-
-        // let re = Regex::new(r#"(?i)^<\?xml\s+version=['"][\d.]+['"]\s+encoding=['"][a-zA-Z\d\-.]+['"].*?\?>"#).unwrap();
-        // if !re.is_match(trimmed_html) {
-        //     println!("encoding mismatch: {}", trimmed_html);
-        //     return format!("{}\n{}", encoding, trimmed_html).into_bytes();
-        // }
-
         match encoding_matcher::is_xml_declaration(trimmed_html) {
             Ok((_, true)) => (),
             _ => {
@@ -252,7 +247,6 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: String) -> Vec<u
         .map_err(|_| "Error parsing OPF file")
         .unwrap();
 
-    // Check and fix language if necessary
     let metadata = opf
         .get_mut_child("metadata")
         .ok_or("No metadata in OPF file")
@@ -269,7 +263,6 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: String) -> Vec<u
         .perform_indent(true)
         .normalize_empty_elements(false);
 
-    // Update file with new OPF content if language was changed
     let mut buf = BufWriter::new(Vec::new());
     opf.write_with_config(&mut buf, config)
         .map_err(|_| "Error serializing OPF file")
@@ -303,19 +296,17 @@ fn fix_language(metadata: &mut Element) -> bool {
         .and_then(|lt| lt.get_text().map(String::from))
         .unwrap_or_default();
 
-    // Validate the language and possibly reset it to a default if not allowed
     let s = simplify_language(language.as_str());
     if !allowed_languages.contains(s.as_str()) {
         println!(
             "Language {} is not supported. Asking for a valid language.",
             language
         );
-        language = "en".to_string(); // Replace this with actual user input in a real scenario
+        language = "en".to_string(); // TODO: replace with flag.
     } else {
         return false;
     }
 
-    // Add a new 'dc:language' element if it doesn't exist
     if language_tag.is_none() {
         println!("Language tag is missing. {:?}", metadata);
         let mut new_language_tag = Element::new("dc:language");
@@ -325,7 +316,6 @@ fn fix_language(metadata: &mut Element) -> bool {
             .push(XMLNode::Text(language.clone()));
         metadata.children.push(XMLNode::Element(new_language_tag));
     } else {
-        // Otherwise, update the existing tag
         let t = language_tag.unwrap();
         t.children.clear();
         t.children.push(XMLNode::Text(language.clone()));
@@ -333,25 +323,19 @@ fn fix_language(metadata: &mut Element) -> bool {
     return true;
 }
 
-// fn test_xml2() {
-//     let data: &'static str = r##"
-// <?xml version="1.0" encoding="utf-8" standalone="yes"?>
-// <names>
-//     <name first="bob" last="jones" />
-//     <name first="elizabeth" last="smith" />
-// </names>
-// "##;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-//     let mut names_element = Element::parse(data.as_bytes()).unwrap();
-
-//     println!("{:#?}", names_element);
-//     {
-//         // get first `name` element
-//         let name = names_element
-//             .get_mut_child("name")
-//             .expect("Can't find name element");
-//         //name.
-//         name.attributes.insert("suffix".to_owned(), "mr".to_owned());
-//     }
-//     names_element.write(File::create("result.xml").unwrap());
-// }
+    #[test]
+    fn process_file_works() {
+        let content = "b";
+        let result = process_file(
+            "a",
+            content.as_bytes(),
+            Vec::new(),
+            "other_path".to_string(),
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "b");
+    }
+}

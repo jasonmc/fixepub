@@ -16,15 +16,18 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        inherit (pkgs) lib;
 
         craneLib = crane.lib.${system};
-        fixepub = craneLib.buildPackage {
-          src = craneLib.cleanCargoSource (craneLib.path ./.);
-          strictDeps = true;
+        src = craneLib.cleanCargoSource (craneLib.path ./.);
 
+        # Common arguments can be set here to avoid repeating them later
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
           buildInputs = [
             # Add additional build inputs here
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ] ++ lib.optionals pkgs.stdenv.isDarwin [
             # Additional darwin specific inputs can be set here
             pkgs.libiconv
           ];
@@ -32,10 +35,27 @@
           # Additional environment variables can be set directly
           # MY_CUSTOM_VAR = "some value";
         };
+
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # Build the actual crate itself, reusing the dependency
+        # artifacts from above.
+        fixepub = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+        });
       in
       {
         checks = {
           inherit fixepub;
+
+          # Run tests with cargo-nextest
+          # Consider setting `doCheck = false` on `my-crate` if you do not want
+          # the tests to run twice
+          fixepub-nextest = craneLib.cargoNextest (commonArgs // {
+            inherit cargoArtifacts;
+            partitions = 1;
+            partitionType = "count";
+          });
         };
 
         packages.default = fixepub;

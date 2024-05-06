@@ -40,3 +40,29 @@ pub fn is_xml_declaration(input: &str) -> IResult<&str, bool> {
         |_| true, // Map the result to `true` to indicate successful parsing
     )(input)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use nom::{error::ErrorKind, Err};
+
+    use super::*;
+
+    #[test]
+    fn is_xml_declaration_matches() {
+        let encoding = r#"<?xml version="1.0" encoding="utf-8"?>"#;
+        let result = is_xml_declaration(encoding);
+        assert_eq!(result, Ok(("", true)));
+    }
+
+    #[test]
+    fn is_xml_declaration_does_not_match() {
+        let encoding = r#"<?xml encoding="utf-8"?>"#;
+        let result = is_xml_declaration(encoding);
+        assert!(matches!(result, Err(Err::Error(_))), "Expected an error for invalid input");
+        if let Err(Err::Error(error)) = result {
+            assert_eq!(error.code, ErrorKind::Tag); // Example: assuming it fails on an initial `tag` call
+        }
+    }
+    
+}

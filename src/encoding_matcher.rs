@@ -35,12 +35,8 @@ pub fn is_xml_declaration(input: &str) -> IResult<&str, bool> {
         opt(preceded(take_while(|c: char| c != '?'), tag_no_case("?>"))),
     );
 
-    map(
-        xml_declaration_parser,
-        |_| true, // Map the result to `true` to indicate successful parsing
-    )(input)
+    map(xml_declaration_parser, |_| true)(input)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -59,10 +55,12 @@ mod tests {
     fn is_xml_declaration_does_not_match() {
         let encoding = r#"<?xml encoding="utf-8"?>"#;
         let result = is_xml_declaration(encoding);
-        assert!(matches!(result, Err(Err::Error(_))), "Expected an error for invalid input");
+        assert!(
+            matches!(result, Err(Err::Error(_))),
+            "Expected an error for invalid input"
+        );
         if let Err(Err::Error(error)) = result {
-            assert_eq!(error.code, ErrorKind::Tag); // Example: assuming it fails on an initial `tag` call
+            assert_eq!(error.code, ErrorKind::Tag);
         }
     }
-    
 }

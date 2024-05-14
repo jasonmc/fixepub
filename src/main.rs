@@ -61,8 +61,6 @@ fn fix(filename: &str, output_filename: &Path) {
     let mut opf_path = "".to_string();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).expect("Failed to access");
-        //println!("Filename: {}", file.name());
-        //std::io::copy(&mut file, &mut std::io::stdout());
         let file_name = file.name().to_string();
         let ext = Path::new(&file_name)
             .extension()
@@ -70,7 +68,6 @@ fn fix(filename: &str, output_filename: &Path) {
             .unwrap_or("");
 
         if ext == "html" || ext == "xhtml" {
-            //let html = fs::read_to_string(file_path).expect("Unable to read file");
             let mut content = Vec::new();
             file.read_to_end(&mut content)
                 .expect("Failed to read file content");
@@ -144,14 +141,17 @@ fn process_file(
     body_id_list: Vec<(String, String)>,
     opf_path: String,
 ) -> Vec<u8> {
-    //println!("processing {}", file_path);
-
-    let a = fix_body_id_link(file_path, content, body_id_list);
-    let b = fix_book_language(file_path, a.as_slice(), opf_path);
-    let c = fix_stray_img(file_path, b.as_slice());
-    let d = fix_encoding(file_path, c.as_slice());
-
-    d
+    fix_encoding(
+        file_path,
+        &fix_stray_img(
+            file_path,
+            &fix_book_language(
+                file_path,
+                &fix_body_id_link(file_path, content, body_id_list),
+                opf_path,
+            ),
+        ),
+    )
 }
 
 fn fix_body_id_link(
@@ -259,7 +259,6 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: String) -> Vec<u
     }
 
     let config = EmitterConfig::new()
-        //.line_separator("\r\n")
         .perform_indent(true)
         .normalize_empty_elements(false);
 

@@ -337,4 +337,115 @@ mod tests {
         );
         assert_eq!(String::from_utf8_lossy(&result), "b");
     }
+
+    #[test]
+    fn change_file_stem_works() {
+        let original_path = Path::new("example/file.txt");
+        let new_stem = "new_file";
+        let new_path = change_file_stem(original_path, new_stem);
+        assert_eq!(new_path.to_string_lossy(), "example/new_file.txt");
+    }
+
+    #[test]
+    fn fix_body_id_link_replaces_links_correctly() {
+        let content = b"<html><body><a href='page1#id1'>Link</a></body></html>";
+        let body_id_list = vec![("page1#id1".to_string(), "new_page1.xhtml".to_string())];
+        let result = fix_body_id_link("file.xhtml", content, body_id_list);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<html><body><a href='new_page1.xhtml'>Link</a></body></html>"
+        );
+    }
+
+    #[test]
+    fn fix_encoding_adds_xml_declaration() {
+        let content = b"<html><body>Test</body></html>";
+        let result = fix_encoding("file.xhtml", content);
+        let expected = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<html><body>Test</body></html>";
+        assert_eq!(String::from_utf8_lossy(&result), expected);
+    }
+
+    #[test]
+    fn fix_encoding_does_not_duplicate_xml_declaration() {
+        let content = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><html><body>Test</body></html>";
+        let result = fix_encoding("file.xhtml", content);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            String::from_utf8_lossy(content)
+        );
+    }
+
+    #[test]
+    fn fix_stray_img_removes_stray_images() {
+        let content = b"<html><body><img/><img src='valid.png'/></body></html>";
+        let result = fix_stray_img("file.xhtml", content);
+
+        let result_str = String::from_utf8_lossy(&result);
+
+        let expected = "<html><head></head><body><img src=\"valid.png\"></body></html>";
+        assert_eq!(
+            result_str, expected,
+            "Unexpected output structure after removing stray images."
+        );
+    }
+
+    #[test]
+    fn get_opf_filename_extracts_correct_path() {
+        let content =
+            b"<container><rootfiles><rootfile full-path='content.opf'/></rootfiles></container>";
+        let result = get_opf_filename(content);
+        assert_eq!(result, "content.opf");
+    }
+
+    #[test]
+    fn fix_book_language_updates_language() {
+        let content = b"<package xmlns=\"http://www.idpf.org/2007/opf\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:language>invalid</dc:language></metadata></package>";
+        let opf_path = "content.opf".to_string();
+        let result = fix_book_language("content.opf", content, opf_path);
+        assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
+    }
+
+    #[test]
+    fn fix_book_language_adds_language_tag() {
+        let content = b"<package><metadata></metadata></package>";
+        let opf_path = "content.opf".to_string();
+        let result = fix_book_language("content.opf", content, opf_path);
+        assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
+    }
+
+    #[test]
+    fn simplify_language_works() {
+        assert_eq!(simplify_language("en-US"), "en");
+        assert_eq!(simplify_language("fr-CA"), "fr");
+    }
+
+    #[test]
+    fn fix_language_updates_invalid_language() {
+        let mut metadata = Element::new("metadata");
+        let mut lang_tag = Element::new("language");
+        lang_tag.children.push(XMLNode::Text("invalid".to_string()));
+        metadata.children.push(XMLNode::Element(lang_tag));
+
+        let changed = fix_language(&mut metadata);
+        assert!(changed);
+        assert_eq!(
+            metadata.get_child("language").unwrap().get_text().unwrap(),
+            "en"
+        );
+    }
+
+    #[test]
+    fn fix_language_does_not_change_valid_language() {
+        let mut metadata = Element::new("metadata");
+        let mut lang_tag = Element::new("language");
+        lang_tag.children.push(XMLNode::Text("en".to_string()));
+        metadata.children.push(XMLNode::Element(lang_tag));
+
+        let changed = fix_language(&mut metadata);
+        assert!(!changed);
+        assert_eq!(
+            metadata.get_child("language").unwrap().get_text().unwrap(),
+            "en"
+        );
+    }
 }

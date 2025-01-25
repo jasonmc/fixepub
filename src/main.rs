@@ -153,16 +153,19 @@ fn process_file(
     )
 }
 
+fn is_xhtml(file_path: &str) -> bool {
+    matches!(
+        Path::new(file_path).extension().and_then(|s| s.to_str()),
+        Some("html" | "xhtml")
+    )
+}
+
 fn fix_body_id_link(
     file_path: &str,
     content: &[u8],
     body_id_list: Vec<(String, String)>,
 ) -> Vec<u8> {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if !(ext == "html" || ext == "xhtml") {
+    if !is_xhtml(file_path) {
         return content.to_vec();
     }
 
@@ -176,11 +179,7 @@ fn fix_body_id_link(
 }
 
 fn fix_encoding(file_path: &str, content: &[u8]) -> Vec<u8> {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if ext == "html" || ext == "xhtml" {
+    if is_xhtml(file_path) {
         let encoding = r#"<?xml version="1.0" encoding="utf-8"?>"#;
         let content_str = String::from_utf8_lossy(content);
         let trimmed_html = content_str.trim_start();
@@ -197,24 +196,19 @@ fn fix_encoding(file_path: &str, content: &[u8]) -> Vec<u8> {
 }
 
 fn fix_stray_img(file_path: &str, content: &[u8]) -> Vec<u8> {
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if !(ext == "html" || ext == "xhtml") {
+    if !is_xhtml(file_path) {
         return content.to_vec();
     }
 
     let html = String::from_utf8_lossy(&content).to_string();
     let mut document = Html::parse_document(&html);
     let selector = Selector::parse("img").unwrap();
-    let mut stray_imgs = Vec::new();
 
-    for img in document.select(&selector) {
-        if img.value().attr("src").is_none() {
-            stray_imgs.push(img.id());
-        }
-    }
+    let stray_imgs: Vec<_> = document
+        .select(&selector)
+        .filter(|img| img.value().attr("src").is_none())
+        .map(|img| img.id())
+        .collect();
 
     if !stray_imgs.is_empty() {
         for img in stray_imgs {

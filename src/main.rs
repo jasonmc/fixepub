@@ -1,5 +1,4 @@
 use clap::Parser;
-use html5ever::tree_builder::TreeSink;
 use indicatif::{ProgressBar, ProgressStyle};
 use scraper::{Html, Selector};
 use std::collections::HashSet;
@@ -8,7 +7,7 @@ use std::io::BufWriter;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use xmltree::{Element, EmitterConfig, XMLNode};
-use zip::{write::FileOptions, ZipArchive, ZipWriter};
+use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 mod encoding_matcher;
 #[derive(Parser, Debug)]
@@ -118,7 +117,7 @@ fn fix(filename: &str, output_filename: &Path) {
             opf_path.clone(),
         );
 
-        let options = FileOptions::default()
+        let options = SimpleFileOptions::default()
             .compression_method(file.compression())
             .unix_permissions(file.unix_mode().unwrap_or(0o755));
 
@@ -219,7 +218,7 @@ fn fix_stray_img(file_path: &str, content: &[u8]) -> Vec<u8> {
 
     if !stray_imgs.is_empty() {
         for img in stray_imgs {
-            document.remove_from_parent(&img);
+            document.tree.get_mut(img).unwrap().detach();
         }
         return document.html().into_bytes();
     }

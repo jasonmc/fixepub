@@ -3,6 +3,7 @@ use nom::{
     bytes::complete::{tag_no_case, take_while},
     character::complete::{char, multispace1},
     combinator::{map, opt},
+    Parser,
     sequence::{delimited, preceded, tuple},
     IResult,
 };
@@ -35,7 +36,7 @@ pub fn is_xml_declaration(input: &str) -> IResult<&str, bool> {
         opt(preceded(take_while(|c: char| c != '?'), tag_no_case("?>"))),
     );
 
-    map(xml_declaration_parser, |_| true)(input)
+    map(xml_declaration_parser, |_| true).parse(input)
 }
 
 #[cfg(test)]

@@ -110,12 +110,8 @@ fn fix(filename: &str, output_filename: &Path) {
         let mut content = Vec::new();
         file.read_to_end(&mut content)
             .expect("Failed to read file content");
-        let modified_content = process_file(
-            file_name.as_str(),
-            &content,
-            body_id_list.clone(),
-            opf_path.clone(),
-        );
+        let modified_content =
+            process_file(file_name.as_str(), &content, &body_id_list, &opf_path);
 
         let options = SimpleFileOptions::default()
             .compression_method(file.compression())
@@ -137,8 +133,8 @@ fn fix(filename: &str, output_filename: &Path) {
 fn process_file(
     file_path: &str,
     content: &[u8],
-    body_id_list: Vec<(String, String)>,
-    opf_path: String,
+    body_id_list: &[(String, String)],
+    opf_path: &str,
 ) -> Vec<u8> {
     fix_encoding(
         file_path,
@@ -163,7 +159,7 @@ fn is_xhtml(file_path: &str) -> bool {
 fn fix_body_id_link(
     file_path: &str,
     content: &[u8],
-    body_id_list: Vec<(String, String)>,
+    body_id_list: &[(String, String)],
 ) -> Vec<u8> {
     if !is_xhtml(file_path) {
         return content.to_vec();
@@ -232,7 +228,7 @@ fn get_opf_filename(content: &[u8]) -> String {
         .to_string()
 }
 
-fn fix_book_language(file_path: &str, content: &[u8], opf_path: String) -> Vec<u8> {
+fn fix_book_language(file_path: &str, content: &[u8], opf_path: &str) -> Vec<u8> {
     if file_path != opf_path {
         return content.to_vec();
     }
@@ -325,8 +321,8 @@ mod tests {
         let result = process_file(
             "a",
             content.as_bytes(),
-            Vec::new(),
-            "other_path".to_string(),
+            &[],
+            "other_path",
         );
         assert_eq!(String::from_utf8_lossy(&result), "b");
     }
@@ -343,7 +339,7 @@ mod tests {
     fn fix_body_id_link_replaces_links_correctly() {
         let content = b"<html><body><a href='page1#id1'>Link</a></body></html>";
         let body_id_list = vec![("page1#id1".to_string(), "new_page1.xhtml".to_string())];
-        let result = fix_body_id_link("file.xhtml", content, body_id_list);
+        let result = fix_body_id_link("file.xhtml", content, &body_id_list);
         assert_eq!(
             String::from_utf8_lossy(&result),
             "<html><body><a href='new_page1.xhtml'>Link</a></body></html>"
@@ -394,7 +390,7 @@ mod tests {
     fn fix_book_language_updates_language() {
         let content = b"<package xmlns=\"http://www.idpf.org/2007/opf\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:language>invalid</dc:language></metadata></package>";
         let opf_path = "content.opf".to_string();
-        let result = fix_book_language("content.opf", content, opf_path);
+        let result = fix_book_language("content.opf", content, &opf_path);
         assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
     }
 
@@ -402,7 +398,7 @@ mod tests {
     fn fix_book_language_adds_language_tag() {
         let content = b"<package><metadata></metadata></package>";
         let opf_path = "content.opf".to_string();
-        let result = fix_book_language("content.opf", content, opf_path);
+        let result = fix_book_language("content.opf", content, &opf_path);
         assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
     }
 

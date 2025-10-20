@@ -109,8 +109,7 @@ fn fix(filename: &str, output_filename: &Path) {
         let mut content = Vec::new();
         file.read_to_end(&mut content)
             .expect("Failed to read file content");
-        let modified_content =
-            process_file(file_name.as_str(), &content, &body_id_list, &opf_path);
+        let modified_content = process_file(file_name.as_str(), &content, &body_id_list, &opf_path);
 
         let options = SimpleFileOptions::default()
             .compression_method(file.compression())
@@ -155,11 +154,7 @@ fn is_xhtml(file_path: &str) -> bool {
     )
 }
 
-fn fix_body_id_link(
-    file_path: &str,
-    content: &[u8],
-    body_id_list: &[(String, String)],
-) -> Vec<u8> {
+fn fix_body_id_link(file_path: &str, content: &[u8], body_id_list: &[(String, String)]) -> Vec<u8> {
     if !is_xhtml(file_path) {
         return content.to_vec();
     }
@@ -266,9 +261,10 @@ const ALLOWED_LANGUAGES: &[&str] = &[
     "af", "afr", "ar", "ara", "baq", "br", "bre", "ca", "cat", "chi", "co", "cor", "cos", "cy",
     "cym", "da", "dan", "de", "deu", "dut", "en", "eng", "es", "eu", "eus", "fi", "fin", "fr",
     "fra", "fre", "frr", "fry", "fy", "ga", "gd", "ger", "gla", "gle", "gl", "glg", "glv", "gsw",
-    "gu", "guj", "gv", "hi", "hin", "is", "ice", "isl", "it", "ita", "ja", "jpn", "kw", "lb", "ltz",
-    "mal", "mar", "ml", "mr", "nb", "nld", "nl", "nn", "nno", "nob", "nor", "oc", "oci", "pl",
-    "por", "pt", "rm", "roh", "sco", "spa", "stq", "sv", "swe", "ta", "tam", "wel", "zho", "zh",
+    "gu", "guj", "gv", "hi", "hin", "is", "ice", "isl", "it", "ita", "ja", "jpn", "kw", "lb",
+    "ltz", "mal", "mar", "ml", "mr", "nb", "nld", "nl", "nn", "nno", "nob", "nor", "oc", "oci",
+    "pl", "por", "pt", "rm", "roh", "sco", "spa", "stq", "sv", "swe", "ta", "tam", "wel", "zho",
+    "zh",
 ];
 
 fn fix_language(metadata: &mut Element) -> bool {
@@ -314,12 +310,7 @@ mod tests {
     #[test]
     fn process_file_works() {
         let content = "b";
-        let result = process_file(
-            "a",
-            content.as_bytes(),
-            &[],
-            "other_path",
-        );
+        let result = process_file("a", content.as_bytes(), &[], "other_path");
         assert_eq!(String::from_utf8_lossy(&result), "b");
     }
 

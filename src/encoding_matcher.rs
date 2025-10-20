@@ -3,9 +3,8 @@ use nom::{
     bytes::complete::{tag_no_case, take_while},
     character::complete::{char, multispace1},
     combinator::{map, opt},
-    Parser,
     sequence::{delimited, preceded, tuple},
-    IResult,
+    IResult, Parser,
 };
 
 pub fn is_xml_declaration(input: &str) -> IResult<&str, bool> {

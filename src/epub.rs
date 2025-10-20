@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 use xmltree::{Element, EmitterConfig, XMLNode};
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
+struct ArchiveEntry {
+    name: String,
+    data: Vec<u8>,
+    options: SimpleFileOptions,
+}
+
 pub(crate) fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
     let mut new_path = PathBuf::new();
 
@@ -30,69 +36,51 @@ pub(crate) fn fix(filename: &str, output_filename: &Path) {
     let output_file = File::create(output_filename).expect("Failed to create output EPUB file");
     let mut output_zip = ZipWriter::new(output_file);
 
-    // iterate over all xhtml to get body IDs
+    let mut entries = Vec::with_capacity(archive.len() as usize);
     let mut body_id_list: Vec<(String, String)> = Vec::new();
-    let mut opf_path = "".to_string();
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).expect("Failed to access");
-        let file_name = file.name().to_string();
-        let ext = Path::new(&file_name)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        if ext == "html" || ext == "xhtml" {
-            let mut content = Vec::new();
-            file.read_to_end(&mut content)
-                .expect("Failed to read file content");
-            let html = String::from_utf8_lossy(&content);
-            let document = Html::parse_document(&html);
-            let body_selector = Selector::parse("body").unwrap();
-            let body = document.select(&body_selector).next();
-
-            if let Some(body_element) = body {
-                let body_id = body_element.value().attr("id").unwrap_or("");
-                if !body_id.is_empty() {
-                    let fname = Path::new(&file_name)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-                    let link_target = format!("{}#{}", fname, body_id);
-                    body_id_list.push((link_target, fname.to_string()));
-                }
-            }
-        }
-        if file_name == "META-INF/container.xml" {
-            let mut content = Vec::new();
-            file.read_to_end(&mut content)
-                .expect("Failed to read file content");
-            opf_path = get_opf_filename(&content)
-        }
-    }
-
-    let pb = ProgressBar::new(archive.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")
-            .unwrap(),
-    );
+    let mut opf_path = String::new();
 
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
             .expect("Failed to access file in ZIP archive");
-        let file_name = file.name().to_string();
-
         let mut content = Vec::new();
         file.read_to_end(&mut content)
             .expect("Failed to read file content");
-        let modified_content = process_file(file_name.as_str(), &content, &body_id_list, &opf_path);
+
+        let file_name = file.name().to_string();
+        if is_xhtml(&file_name) {
+            if let Some(entry) = collect_body_id(&file_name, &content) {
+                body_id_list.push(entry);
+            }
+        }
+
+        if file_name == "META-INF/container.xml" {
+            opf_path = get_opf_filename(&content);
+        }
 
         let options = SimpleFileOptions::default()
             .compression_method(file.compression())
             .unix_permissions(file.unix_mode().unwrap_or(0o755));
 
+        entries.push(ArchiveEntry {
+            name: file_name,
+            data: content,
+            options,
+        });
+    }
+
+    let pb = ProgressBar::new(entries.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")
+            .unwrap(),
+    );
+
+    for entry in entries {
+        let modified_content =
+            process_file(entry.name.as_str(), &entry.data, &body_id_list, &opf_path);
         output_zip
-            .start_file(file_name, options)
+            .start_file(entry.name, entry.options)
             .expect("Failed to start file in ZIP");
         output_zip
             .write_all(&modified_content)
@@ -277,6 +265,25 @@ fn fix_language(metadata: &mut Element) -> bool {
         t.children.push(XMLNode::Text(language.clone()));
     }
     true
+}
+
+fn collect_body_id(file_name: &str, content: &[u8]) -> Option<(String, String)> {
+    let html = String::from_utf8_lossy(content);
+    let document = Html::parse_document(&html);
+    let body_selector = Selector::parse("body").unwrap();
+    let body = document.select(&body_selector).next()?;
+
+    let body_id = body.value().attr("id").unwrap_or("");
+    if body_id.is_empty() {
+        return None;
+    }
+
+    let fname = Path::new(file_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let link_target = format!("{}#{}", fname, body_id);
+    Some((link_target, fname.to_string()))
 }
 
 #[cfg(test)]

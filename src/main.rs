@@ -1,7 +1,6 @@
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use scraper::{Html, Selector};
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::{Read, Write};
@@ -263,19 +262,16 @@ fn simplify_language(lang: &str) -> String {
     lang.split('-').next().unwrap().to_lowercase()
 }
 
-fn fix_language(metadata: &mut Element) -> bool {
-    let allowed_languages = vec![
-        "af", "gsw", "ar", "eu", "nb", "br", "ca", "zh", "kw", "co", "da", "nl", "stq", "en", "fi",
-        "fr", "fy", "gl", "de", "gu", "hi", "is", "ga", "it", "ja", "lb", "mr", "ml", "gv", "frr",
-        "nb", "nn", "pl", "pt", "oc", "rm", "sco", "gd", "es", "sv", "ta", "cy", "afr", "ara",
-        "eus", "baq", "nob", "bre", "cat", "zho", "chi", "cor", "cos", "dan", "nld", "dut", "eng",
-        "fin", "fra", "fre", "fry", "glg", "deu", "ger", "guj", "hin", "isl", "ice", "gle", "ita",
-        "jpn", "ltz", "mar", "mal", "glv", "nor", "nno", "por", "oci", "roh", "gla", "spa", "swe",
-        "tam", "cym", "wel",
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
+const ALLOWED_LANGUAGES: &[&str] = &[
+    "af", "afr", "ar", "ara", "baq", "br", "bre", "ca", "cat", "chi", "co", "cor", "cos", "cy",
+    "cym", "da", "dan", "de", "deu", "dut", "en", "eng", "es", "eu", "eus", "fi", "fin", "fr",
+    "fra", "fre", "frr", "fry", "fy", "ga", "gd", "ger", "gla", "gle", "gl", "glg", "glv", "gsw",
+    "gu", "guj", "gv", "hi", "hin", "is", "ice", "isl", "it", "ita", "ja", "jpn", "kw", "lb", "ltz",
+    "mal", "mar", "ml", "mr", "nb", "nld", "nl", "nn", "nno", "nob", "nor", "oc", "oci", "pl",
+    "por", "pt", "rm", "roh", "sco", "spa", "stq", "sv", "swe", "ta", "tam", "wel", "zho", "zh",
+];
 
+fn fix_language(metadata: &mut Element) -> bool {
     // Check if 'dc:language' exists and extract the language, if present
     let mut language_tag = metadata.get_mut_child("language");
 
@@ -285,7 +281,7 @@ fn fix_language(metadata: &mut Element) -> bool {
         .unwrap_or_default();
 
     let s = simplify_language(language.as_str());
-    if !allowed_languages.contains(s.as_str()) {
+    if !ALLOWED_LANGUAGES.contains(&s.as_str()) {
         println!(
             "Language {} is not supported. Asking for a valid language.",
             language

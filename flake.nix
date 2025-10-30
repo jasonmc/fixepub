@@ -26,7 +26,7 @@
             # Add additional build inputs here
           ] ++ lib.optionals pkgs.stdenv.isDarwin [
             # Additional darwin specific inputs can be set here
-            pkgs.libiconv-darwin
+            pkgs.darwin.libiconv
           ];
 
           # Additional environment variables can be set directly

@@ -2,5 +2,8 @@ use clap::Parser;
 
 fn main() {
     let args = fixepub::Args::parse();
-    fixepub::run(args);
+    if let Err(err) = fixepub::run(args) {
+        eprintln!("error: {}", err);
+        std::process::exit(1);
+    }
 }

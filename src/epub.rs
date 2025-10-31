@@ -1,4 +1,4 @@
-use crate::encoding_matcher;
+use crate::{encoding_matcher, error::FixError};
 use indicatif::{ProgressBar, ProgressStyle};
 use scraper::{Html, Selector};
 use std::fs::File;
@@ -29,24 +29,21 @@ pub(crate) fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf 
     new_path
 }
 
-pub(crate) fn fix(filename: &str, output_filename: &Path) {
-    let file = File::open(filename).expect("Failed to open EPUB file");
-    let mut archive = ZipArchive::new(file).expect("Failed to read ZIP archive");
+pub(crate) fn fix(filename: &str, output_filename: &Path) -> Result<(), FixError> {
+    let file = File::open(filename)?;
+    let mut archive = ZipArchive::new(file)?;
 
-    let output_file = File::create(output_filename).expect("Failed to create output EPUB file");
+    let output_file = File::create(output_filename)?;
     let mut output_zip = ZipWriter::new(output_file);
 
-    let mut entries = Vec::with_capacity(archive.len() as usize);
+    let mut entries = Vec::with_capacity(archive.len());
     let mut body_id_list: Vec<(String, String)> = Vec::new();
     let mut opf_path = String::new();
 
     for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .expect("Failed to access file in ZIP archive");
+        let mut file = archive.by_index(i)?;
         let mut content = Vec::new();
-        file.read_to_end(&mut content)
-            .expect("Failed to read file content");
+        file.read_to_end(&mut content)?;
 
         let file_name = file.name().to_string();
         if is_xhtml(&file_name) {
@@ -71,25 +68,21 @@ pub(crate) fn fix(filename: &str, output_filename: &Path) {
     }
 
     let pb = ProgressBar::new(entries.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")
-            .unwrap(),
-    );
+    let style =
+        ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")?;
+    pb.set_style(style);
 
     for entry in entries {
         let modified_content =
             process_file(entry.name.as_str(), &entry.data, &body_id_list, &opf_path);
-        output_zip
-            .start_file(entry.name, entry.options)
-            .expect("Failed to start file in ZIP");
-        output_zip
-            .write_all(&modified_content)
-            .expect("Failed to write file content");
+        output_zip.start_file(entry.name, entry.options)?;
+        output_zip.write_all(&modified_content)?;
         pb.inc(1);
     }
 
-    output_zip.finish().expect("Failed to finalize ZIP archive");
+    output_zip.finish()?;
     pb.finish_with_message("done");
+    Ok(())
 }
 
 fn process_file(

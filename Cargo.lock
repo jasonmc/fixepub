@@ -430,7 +430,6 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
- "html5ever",
  "indicatif",
  "nom",
  "scraper",

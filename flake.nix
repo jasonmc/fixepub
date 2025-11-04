@@ -4,75 +4,75 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-    crane.url = "github:ipetkov/crane";
-
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, crane, flake-utils, ... }:
+  outputs = { self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        inherit (pkgs) lib;
+        inherit (pkgs) lib rustPlatform;
 
-        craneLib = crane.mkLib pkgs;
-        src = craneLib.cleanCargoSource (craneLib.path ./.);
+        rustSrc = pkgs.rust.packages.stable.rustPlatform.rustLibSrc;
 
-        # Common arguments can be set here to avoid repeating them later
-        commonArgs = {
+        cargoToml = lib.importTOML ./Cargo.toml;
+
+        src = lib.cleanSource ./.;
+
+        fixepub = rustPlatform.buildRustPackage {
+          pname = cargoToml.package.name;
+          version = cargoToml.package.version;
           inherit src;
-          strictDeps = true;
-          buildInputs = [
-            # Add additional build inputs here
-          ] ++ lib.optionals pkgs.stdenv.isDarwin [
-            # Additional darwin specific inputs can be set here
-            pkgs.darwin.libiconv
+          cargoLock.lockFile = ./Cargo.lock;
+          doCheck = false;
+          buildInputs =
+            [
+              # Add additional build inputs here
+            ]
+            ++ lib.optionals pkgs.stdenv.isDarwin [
+              # Additional darwin specific inputs can be set here
+              pkgs.darwin.libiconv
           ];
-
-          # Additional environment variables can be set directly
-          # MY_CUSTOM_VAR = "some value";
+          strictDeps = true;
         };
 
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-
-        # Build the actual crate itself, reusing the dependency
-        # artifacts from above.
-        fixepub = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
+        fixepubNextest = fixepub.overrideAttrs (old: {
+          pname = "${old.pname}-nextest";
+          nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.cargo-nextest ];
+          checkPhase = ''
+            runHook preCheck
+            cargo nextest run --all-targets --workspace
+            runHook postCheck
+          '';
         });
       in
       {
         checks = {
-          inherit fixepub;
-
-          # Run tests with cargo-nextest
-          # Consider setting `doCheck = false` on `my-crate` if you do not want
-          # the tests to run twice
-          fixepub-nextest = craneLib.cargoNextest (commonArgs // {
-            inherit cargoArtifacts;
-            partitions = 1;
-            partitionType = "count";
-          });
+          inherit fixepub fixepubNextest;
         };
 
         packages.default = fixepub;
 
-        apps.default = flake-utils.lib.mkApp {
-          drv = fixepub;
-        };
+        apps.default =
+          (flake-utils.lib.mkApp {
+            drv = fixepub;
+          }) // {
+            meta = {
+              description = "Tool to fix ePub files";
+            };
+          };
 
-        devShells.default = craneLib.devShell {
-          # Inherit inputs from checks.
-          checks = self.checks.${system};
-
-          # Additional dev-shell environment variables can be set directly
-          # MY_CUSTOM_DEVELOPMENT_VAR = "something else";
-          RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
-
-          # Extra inputs can be added here; cargo and rustc are provided by default.
-          packages = [
-            # pkgs.ripgrep
-          ];
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ fixepub ];
+          RUST_SRC_PATH = "${rustSrc}";
+          buildInputs = (with pkgs; [
+            cargo
+            cargo-nextest
+            clippy
+            rust-analyzer
+            rustfmt
+            rustc
+          ]);
         };
       });
 }

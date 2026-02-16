@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
-indicatif = "0.18.3"
+indicatif = "0.18.4"
 nom = "8.0.0"
 scraper = "0.25.0"
 xmltree = "0.12.0"

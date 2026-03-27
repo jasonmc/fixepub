@@ -53,7 +53,9 @@ pub(crate) fn fix(filename: &str, output_filename: &Path) -> Result<(), FixError
         }
 
         if file_name == "META-INF/container.xml" {
-            opf_path = get_opf_filename(&content);
+            if let Some(path) = get_opf_filename(&content) {
+                opf_path = path;
+            }
         }
 
         let options = SimpleFileOptions::default()
@@ -166,31 +168,27 @@ fn fix_stray_img(file_path: &str, content: &[u8]) -> Vec<u8> {
     content.to_vec()
 }
 
-fn get_opf_filename(content: &[u8]) -> String {
-    let container_xml = Element::parse(content)
-        .map_err(|_| "Error parsing container.xml")
-        .unwrap();
+fn get_opf_filename(content: &[u8]) -> Option<String> {
+    let container_xml = Element::parse(content).ok()?;
     container_xml
         .get_child("rootfiles")
         .and_then(|rf| rf.get_child("rootfile"))
         .and_then(|rf| rf.attributes.get("full-path"))
-        .ok_or("Cannot find OPF file path in container.xml")
-        .unwrap()
-        .to_string()
+        .map(|path| path.to_string())
 }
 
 fn fix_book_language(file_path: &str, content: &[u8], opf_path: &str) -> Vec<u8> {
-    if file_path != opf_path {
+    if opf_path.is_empty() || file_path != opf_path {
         return content.to_vec();
     }
-    let mut opf = Element::parse(content)
-        .map_err(|_| "Error parsing OPF file")
-        .unwrap();
+    let mut opf = match Element::parse(content) {
+        Ok(opf) => opf,
+        Err(_) => return content.to_vec(),
+    };
 
-    let metadata = opf
-        .get_mut_child("metadata")
-        .ok_or("No metadata in OPF file")
-        .unwrap();
+    let Some(metadata) = opf.get_mut_child("metadata") else {
+        return content.to_vec();
+    };
 
     let changed = fix_language(metadata);
 
@@ -203,11 +201,14 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: &str) -> Vec<u8>
         .normalize_empty_elements(false);
 
     let mut buf = BufWriter::new(Vec::new());
-    opf.write_with_config(&mut buf, config)
-        .map_err(|_| "Error serializing OPF file")
-        .unwrap();
+    if opf.write_with_config(&mut buf, config).is_err() {
+        return content.to_vec();
+    }
 
-    buf.into_inner().unwrap()
+    match buf.into_inner() {
+        Ok(bytes) => bytes,
+        Err(_) => content.to_vec(),
+    }
 }
 
 fn simplify_language(lang: &str) -> String {
@@ -346,7 +347,14 @@ mod tests {
         let content =
             b"<container><rootfiles><rootfile full-path='content.opf'/></rootfiles></container>";
         let result = get_opf_filename(content);
-        assert_eq!(result, "content.opf");
+        assert_eq!(result, Some("content.opf".to_string()));
+    }
+
+    #[test]
+    fn get_opf_filename_returns_none_for_invalid_container() {
+        let content = b"<container><rootfiles></container>";
+        let result = get_opf_filename(content);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -363,6 +371,22 @@ mod tests {
         let opf_path = "content.opf".to_string();
         let result = fix_book_language("content.opf", content, &opf_path);
         assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
+    }
+
+    #[test]
+    fn fix_book_language_returns_original_on_invalid_xml() {
+        let content = b"<package><metadata>";
+        let opf_path = "content.opf".to_string();
+        let result = fix_book_language("content.opf", content, &opf_path);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn fix_book_language_returns_original_without_metadata() {
+        let content = b"<package></package>";
+        let opf_path = "content.opf".to_string();
+        let result = fix_book_language("content.opf", content, &opf_path);
+        assert_eq!(result, content);
     }
 
     #[test]

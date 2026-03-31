@@ -1,5 +1,6 @@
 use crate::{encoding_matcher, error::FixError};
 use indicatif::{ProgressBar, ProgressStyle};
+use language_tags::LanguageTag;
 use scraper::{Html, Selector};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
@@ -211,20 +212,6 @@ fn fix_book_language(file_path: &str, content: &[u8], opf_path: &str) -> Vec<u8>
     }
 }
 
-fn simplify_language(lang: &str) -> String {
-    lang.split('-').next().unwrap().to_lowercase()
-}
-
-const ALLOWED_LANGUAGES: &[&str] = &[
-    "af", "afr", "ar", "ara", "baq", "br", "bre", "ca", "cat", "chi", "co", "cor", "cos", "cy",
-    "cym", "da", "dan", "de", "deu", "dut", "en", "eng", "es", "eu", "eus", "fi", "fin", "fr",
-    "fra", "fre", "frr", "fry", "fy", "ga", "gd", "ger", "gla", "gle", "gl", "glg", "glv", "gsw",
-    "gu", "guj", "gv", "hi", "hin", "is", "ice", "isl", "it", "ita", "ja", "jpn", "kw", "lb",
-    "ltz", "mal", "mar", "ml", "mr", "nb", "nld", "nl", "nn", "nno", "nob", "nor", "oc", "oci",
-    "pl", "por", "pt", "rm", "roh", "sco", "spa", "stq", "sv", "swe", "ta", "tam", "wel", "zho",
-    "zh",
-];
-
 fn fix_language(metadata: &mut Element) -> bool {
     // Check if 'dc:language' exists and extract the language, if present
     let mut language_tag = metadata.get_mut_child("language");
@@ -234,8 +221,12 @@ fn fix_language(metadata: &mut Element) -> bool {
         .and_then(|lt| lt.get_text().map(String::from))
         .unwrap_or_default();
 
-    let s = simplify_language(language.as_str());
-    if !ALLOWED_LANGUAGES.contains(&s.as_str()) {
+    let is_valid = match LanguageTag::parse(language.as_str()) {
+        Ok(tag) => tag.validate().is_ok(),
+        Err(_) => false,
+    };
+
+    if !is_valid {
         println!(
             "Language {} is not supported. Asking for a valid language.",
             language
@@ -390,12 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn simplify_language_works() {
-        assert_eq!(simplify_language("en-US"), "en");
-        assert_eq!(simplify_language("fr-CA"), "fr");
-    }
-
-    #[test]
     fn fix_language_updates_invalid_language() {
         let mut metadata = Element::new("metadata");
         let mut lang_tag = Element::new("language");
@@ -422,6 +407,21 @@ mod tests {
         assert_eq!(
             metadata.get_child("language").unwrap().get_text().unwrap(),
             "en"
+        );
+    }
+
+    #[test]
+    fn fix_language_keeps_valid_bcp47_tag() {
+        let mut metadata = Element::new("metadata");
+        let mut lang_tag = Element::new("language");
+        lang_tag.children.push(XMLNode::Text("en-US".to_string()));
+        metadata.children.push(XMLNode::Element(lang_tag));
+
+        let changed = fix_language(&mut metadata);
+        assert!(!changed);
+        assert_eq!(
+            metadata.get_child("language").unwrap().get_text().unwrap(),
+            "en-US"
         );
     }
 }

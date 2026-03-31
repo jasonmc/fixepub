@@ -10,6 +10,7 @@ clap = { version = "4.6.0", features = ["derive"] }
 indicatif = "0.18.4"
 nom = "8.0.0"
 scraper = "0.26.0"
+thiserror = "2.0.12"
 xmltree = "0.12.0"
 zip = "8.4.0"
 

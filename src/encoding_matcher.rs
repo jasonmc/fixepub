@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag_no_case, take_while},
     character::complete::{char, multispace1},
     combinator::{map, opt},
-    sequence::{delimited, preceded, tuple},
+    sequence::{delimited, preceded},
     IResult, Parser,
 };
 
@@ -28,10 +28,10 @@ pub fn is_xml_declaration(input: &str) -> IResult<&str, bool> {
 
     let xml_declaration_parser = delimited(
         tag_no_case("<?xml"),
-        tuple((
+        (
             preceded(multispace1, version_parser),
             preceded(multispace1, encoding_parser),
-        )),
+        ),
         opt(preceded(take_while(|c: char| c != '?'), tag_no_case("?>"))),
     );
 

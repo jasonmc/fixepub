@@ -46,7 +46,7 @@ pub(crate) fn fix(filename: &str, output_filename: &Path) -> Result<(), FixError
         let mut content = Vec::new();
         file.read_to_end(&mut content)?;
 
-        let file_name = file.name().to_string();
+        let file_name = file.name()?.into_owned();
         if is_xhtml(&file_name) {
             if let Some(entry) = collect_body_id(&file_name, &content) {
                 body_id_list.push(entry);

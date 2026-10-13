@@ -117,7 +117,6 @@ fn output_preserves_unchanged_entries_and_has_a_valid_mimetype() -> Result<(), B
     let input = temp.path().join("sample.epub");
     build_sample_epub(&input)?;
     assert_cmd::Command::cargo_bin("fixepub")?
-        .arg("--")
         .arg(&input)
         .assert()
         .success();
@@ -168,12 +167,28 @@ fn output_preserves_unchanged_entries_and_has_a_valid_mimetype() -> Result<(), B
 }
 
 #[test]
+fn failed_repair_never_replaces_existing_output_or_leaves_partial_files(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let input = temp.path().join("sample.epub");
+    build_epub(&input, b"<html><body/><unclosed>")?;
+    let original_input = std::fs::read(&input)?;
+    let output = temp.path().join("sample-fixed.epub");
+    std::fs::write(&output, b"existing output")?;
+    let mut command = assert_cmd::Command::cargo_bin("fixepub")?;
+    command.arg("--force").arg(&input).assert().failure();
+    assert_eq!(std::fs::read(&output)?, b"existing output");
+    assert_eq!(std::fs::read(&input)?, original_input);
+    assert_eq!(std::fs::read_dir(temp.path())?.count(), 2);
+    Ok(())
+}
+
+#[test]
 fn failed_repair_does_not_create_output() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let input = temp.path().join("sample.epub");
     build_epub(&input, b"<html><body/><unclosed>")?;
     assert_cmd::Command::cargo_bin("fixepub")?
-        .arg("--")
         .arg(&input)
         .assert()
         .failure();
@@ -182,18 +197,71 @@ fn failed_repair_does_not_create_output() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn existing_output_is_protected() -> Result<(), Box<dyn Error>> {
+fn overwrite_requires_force_and_language_can_be_selected() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let input = temp.path().join("sample.epub");
     build_sample_epub(&input)?;
     let output = temp.path().join("sample-fixed.epub");
     std::fs::write(&output, b"existing output")?;
     assert_cmd::Command::cargo_bin("fixepub")?
-        .arg("--")
         .arg(&input)
         .assert()
         .failure();
     assert_eq!(std::fs::read(&output)?, b"existing output");
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .args(["--force", "--language", "fr-CA"])
+        .arg(&input)
+        .assert()
+        .success();
+    let mut archive = ZipArchive::new(File::open(output)?)?;
+    let mut opf = String::new();
+    archive.by_name("content.opf")?.read_to_string(&mut opf)?;
+    assert!(opf.contains("<dc:language>fr-CA</dc:language>"));
+    Ok(())
+}
+
+#[test]
+fn cli_rejects_no_inputs_and_invalid_language() -> Result<(), Box<dyn Error>> {
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .assert()
+        .failure();
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .args(["--language", "invalid", "missing.epub"])
+        .assert()
+        .failure();
+    Ok(())
+}
+
+#[test]
+fn dotted_filenames_keep_the_entire_stem() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let input = temp.path().join("book.second.edition.epub");
+    build_sample_epub(&input)?;
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .arg(&input)
+        .assert()
+        .success();
+    assert!(temp.path().join("book.second.edition-fixed.epub").exists());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_filenames_are_supported() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempdir()?;
+    let input = temp
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"book\xff.epub"));
+    build_sample_epub(&input)?;
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .arg(&input)
+        .assert()
+        .success();
+    assert!(temp
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"book\xff-fixed.epub"))
+        .exists());
     Ok(())
 }
 
@@ -237,7 +305,6 @@ fn cli_resolves_dot_directory_bases_without_rewriting_other_fragments() -> Resul
         ],
     )?;
     assert_cmd::Command::cargo_bin("fixepub")?
-        .arg("--")
         .arg(&input)
         .assert()
         .success();
@@ -273,7 +340,6 @@ fn cli_preserves_literal_archive_path_characters_during_link_repair() -> Result<
             ],
         )?;
         assert_cmd::Command::cargo_bin("fixepub")?
-            .arg("--")
             .arg(&input)
             .assert()
             .success();

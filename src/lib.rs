@@ -7,21 +7,19 @@ mod xhtml_entities;
 pub use cli::Args;
 pub use error::FixError;
 
-use std::path::Path;
-
 pub fn run(args: Args) -> Result<(), FixError> {
     for filename in args.filenames {
-        let path = Path::new(&filename);
+        let path = filename.as_path();
         let stem = path
             .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| FixError::InvalidFileName(filename.clone()))?;
-        let new_stem = format!("{stem}-fixed");
+            .ok_or_else(|| FixError::InvalidFileName(filename.to_string_lossy().into_owned()))?;
+        let mut new_stem = stem.to_os_string();
+        new_stem.push("-fixed");
         let new_path = epub::change_file_stem(path, &new_stem);
         let output_path = new_path.as_path();
 
-        println!("{} ⟶ {}", filename, output_path.to_string_lossy());
-        epub::fix(path, output_path, "en", false)?;
+        println!("{} ⟶ {}", filename.display(), output_path.display());
+        epub::fix(&filename, output_path, &args.language, args.force)?;
     }
     Ok(())
 }

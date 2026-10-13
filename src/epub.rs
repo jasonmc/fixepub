@@ -16,20 +16,16 @@ const DC: &str = "http://purl.org/dc/elements/1.1/";
 const OPF: &str = "http://www.idpf.org/2007/opf";
 const XML: &str = "http://www.w3.org/XML/1998/namespace";
 
-pub(crate) fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
-    let mut new_path = PathBuf::new();
-
-    if let Some(parent) = original_path.parent() {
-        new_path.push(parent);
+pub(crate) fn change_file_stem(
+    original_path: &Path,
+    new_stem: impl AsRef<std::ffi::OsStr>,
+) -> PathBuf {
+    let mut filename = new_stem.as_ref().to_os_string();
+    if let Some(extension) = original_path.extension() {
+        filename.push(".");
+        filename.push(extension);
     }
-
-    let new_filename = match original_path.extension() {
-        Some(extension) => format!("{}.{}", new_stem, extension.to_string_lossy()),
-        None => new_stem.to_string(),
-    };
-
-    new_path.push(new_filename);
-    new_path
+    original_path.with_file_name(filename)
 }
 
 fn xml_events<'a>(
@@ -795,6 +791,24 @@ mod tests {
     }
 
     #[test]
+    fn output_filename_keeps_extension() {
+        assert_eq!(
+            change_file_stem(Path::new("books/book.epub"), "book-fixed"),
+            Path::new("books/book-fixed.epub")
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn output_paths_preserve_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let original = Path::new(std::ffi::OsStr::from_bytes(b"book\xff.epub"));
+        let stem = std::ffi::OsStr::from_bytes(b"book\xff-fixed");
+        assert_eq!(
+            change_file_stem(original, stem).as_os_str().as_bytes(),
+            b"book\xff-fixed.epub"
+        );
+    }
+    #[test]
     fn links_respect_the_document_base_url() {
         let output = repair(
             "nav.xhtml",
@@ -951,12 +965,5 @@ mod tests {
                 "{directory}"
             );
         }
-    }
-    #[test]
-    fn change_file_stem_works() {
-        let original_path = Path::new("example/file.txt");
-        let new_stem = "new_file";
-        let new_path = change_file_stem(original_path, new_stem);
-        assert_eq!(new_path.to_string_lossy(), "example/new_file.txt");
     }
 }

@@ -38,6 +38,7 @@
 
         fixepubNextest = fixepub.overrideAttrs (old: {
           pname = "${old.pname}-nextest";
+          doCheck = true;
           nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.cargo-nextest ];
           checkPhase = ''
             runHook preCheck

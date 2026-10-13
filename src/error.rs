@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FixError {
+    #[error("invalid document {path}: {message}")]
+    InvalidDocument { path: String, message: String },
     #[error("I/O error: {0}")]
     Io(std::io::Error),
     #[error("ZIP error: {0}")]

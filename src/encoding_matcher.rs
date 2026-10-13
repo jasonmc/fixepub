@@ -1,66 +1,51 @@
 use nom::{
-    branch::alt,
-    bytes::complete::{tag_no_case, take_while},
-    character::complete::{char, multispace1},
-    combinator::{map, opt},
-    sequence::{delimited, preceded},
-    IResult, Parser,
+    error::{Error, ErrorKind},
+    Err, IResult,
 };
 
+/// Recognize a complete XML declaration using the same parser as document repair.
 pub fn is_xml_declaration(input: &str) -> IResult<&str, bool> {
-    let version_parser = preceded(
-        tag_no_case("version="),
-        delimited(
-            alt((char('\''), char('"'))),
-            take_while(|c: char| c.is_ascii_digit() || c == '.'),
-            alt((char('\''), char('"'))),
-        ),
-    );
-
-    let encoding_parser = preceded(
-        tag_no_case("encoding="),
-        delimited(
-            alt((char('\''), char('"'))),
-            take_while(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
-            alt((char('\''), char('"'))),
-        ),
-    );
-
-    let xml_declaration_parser = delimited(
-        tag_no_case("<?xml"),
-        (
-            preceded(multispace1, version_parser),
-            preceded(multispace1, encoding_parser),
-        ),
-        opt(preceded(take_while(|c: char| c != '?'), tag_no_case("?>"))),
-    );
-
-    map(xml_declaration_parser, |_| true).parse(input)
+    let invalid = || Err::Error(Error::new(input, ErrorKind::Tag));
+    if !input.starts_with("<?xml") || !input.as_bytes().get(5).is_some_and(u8::is_ascii_whitespace)
+    {
+        return Err(invalid());
+    }
+    let end = input.find("?>").ok_or_else(invalid)? + 2;
+    let document = format!("{}<root/>", &input[..end]);
+    if xml::EventReader::from_str(&document)
+        .into_iter()
+        .any(|event| event.is_err())
+    {
+        return Err(invalid());
+    }
+    Ok((&input[end..], true))
 }
 
 #[cfg(test)]
 mod tests {
-    use nom::{error::ErrorKind, Err};
-
     use super::*;
 
     #[test]
-    fn is_xml_declaration_matches() {
-        let encoding = r#"<?xml version="1.0" encoding="utf-8"?>"#;
-        let result = is_xml_declaration(encoding);
-        assert_eq!(result, Ok(("", true)));
+    fn accepts_complete_declarations() {
+        for declaration in [
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+            "<?xml version='1.0'?>",
+            "<?xml version = '1.0' encoding = 'UTF-8' standalone='yes'?>",
+        ] {
+            let input = format!("{declaration}<html/>");
+            assert_eq!(is_xml_declaration(&input), Ok(("<html/>", true)));
+        }
     }
 
     #[test]
-    fn is_xml_declaration_does_not_match() {
-        let encoding = r#"<?xml encoding="utf-8"?>"#;
-        let result = is_xml_declaration(encoding);
-        assert!(
-            matches!(result, Err(Err::Error(_))),
-            "Expected an error for invalid input"
-        );
-        if let Err(Err::Error(error)) = result {
-            assert_eq!(error.code, ErrorKind::Tag);
+    fn rejects_malformed_declarations() {
+        for input in [
+            "<?xml encoding='utf-8'?>",
+            "<?xml version='1.0' encoding='UTF-8'",
+            "<?xml version='1.0\"?>",
+            "<?xml-stylesheet href='style.css'?>",
+        ] {
+            assert!(is_xml_declaration(input).is_err(), "{input}");
         }
     }
 }

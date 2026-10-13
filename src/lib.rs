@@ -2,6 +2,7 @@ pub mod cli;
 pub mod encoding_matcher;
 pub mod epub;
 pub mod error;
+mod xhtml_entities;
 
 pub use cli::Args;
 pub use error::FixError;

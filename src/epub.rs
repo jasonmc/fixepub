@@ -1,18 +1,19 @@
-use crate::{encoding_matcher, error::FixError};
+use crate::error::FixError;
 use indicatif::{ProgressBar, ProgressStyle};
 use language_tags::LanguageTag;
-use scraper::{Html, Selector};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use xmltree::{Element, EmitterConfig, XMLNode};
+use xml::name::OwnedName;
+use xml::reader::{ParserConfig, XmlEvent};
+use xml::writer::EmitterConfig;
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
-struct ArchiveEntry {
-    name: String,
-    data: Vec<u8>,
-    options: SimpleFileOptions,
-}
+const XHTML: &str = "http://www.w3.org/1999/xhtml";
+const DC: &str = "http://purl.org/dc/elements/1.1/";
+const OPF: &str = "http://www.idpf.org/2007/opf";
+const XML: &str = "http://www.w3.org/XML/1998/namespace";
 
 pub(crate) fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf {
     let mut new_path = PathBuf::new();
@@ -30,398 +31,887 @@ pub(crate) fn change_file_stem(original_path: &Path, new_stem: &str) -> PathBuf 
     new_path
 }
 
+fn xml_events<'a>(
+    path: &'a str,
+    content: impl Read + 'a,
+) -> impl Iterator<Item = Result<XmlEvent, FixError>> + 'a {
+    let mut reader = ParserConfig::new()
+        .ignore_comments(false)
+        .create_reader(content);
+    let mut finished = false;
+    let mut standalone = false;
+    std::iter::from_fn(move || {
+        if finished {
+            return None;
+        }
+        let event = match reader.next() {
+            Ok(event) => event,
+            Err(error) => {
+                finished = true;
+                return Some(Err(xml_error(path, error)));
+            }
+        };
+        match &event {
+            XmlEvent::StartDocument {
+                standalone: value, ..
+            } => standalone = *value == Some(true),
+            XmlEvent::Doctype { syntax } if is_xhtml(path) && !standalone => {
+                // The XML parser gives configured entities precedence over the
+                // internal subset. Supply only names not declared by the document.
+                let declared = declared_entity_names(syntax);
+                let entities =
+                    crate::xhtml_entities::entities().filter(|(name, _)| !declared.contains(name));
+                if let Err(error) = reader.add_entities(entities) {
+                    finished = true;
+                    return Some(Err(xml_error(path, error)));
+                }
+            }
+            XmlEvent::EndDocument => finished = true,
+            _ => {}
+        }
+        Some(Ok(event))
+    })
+}
+
+fn declared_entity_names(mut syntax: &str) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    while !syntax.is_empty() {
+        if let Some(instruction) = syntax.strip_prefix("<?") {
+            syntax = instruction
+                .find("?>")
+                .map_or("", |end| &instruction[end + 2..]);
+            continue;
+        }
+        if let Some(comment) = syntax.strip_prefix("<!--") {
+            syntax = comment.find("-->").map_or("", |end| &comment[end + 3..]);
+            continue;
+        }
+        let first = syntax.chars().next().unwrap();
+        if first == '\'' || first == '"' {
+            let quoted = &syntax[first.len_utf8()..];
+            syntax = quoted
+                .find(first)
+                .map_or("", |end| &quoted[end + first.len_utf8()..]);
+            continue;
+        }
+        if let Some(declaration) = syntax.strip_prefix("<!ENTITY") {
+            if declaration.starts_with(char::is_whitespace) {
+                if let Some(name) = declaration.split_whitespace().next() {
+                    // Parameter entities have separate names and cannot override
+                    // these general character entity mappings directly.
+                    if name != "%" {
+                        names.insert(name);
+                    }
+                }
+            }
+        }
+        syntax = &syntax[first.len_utf8()..];
+    }
+    names
+}
+
+fn xml_error(path: &str, error: impl std::fmt::Display) -> FixError {
+    FixError::InvalidDocument {
+        path: path.to_owned(),
+        message: error.to_string(),
+    }
+}
+
+fn parse(path: &str, content: &[u8]) -> Result<Vec<XmlEvent>, FixError> {
+    xml_events(path, content).collect()
+}
+
+struct ArchiveEntry {
+    name: String,
+    data: Vec<u8>,
+    options: SimpleFileOptions,
+}
+
 pub(crate) fn fix(filename: &str, output_filename: &Path) -> Result<(), FixError> {
-    let file = File::open(filename)?;
-    let mut archive = ZipArchive::new(file)?;
-
-    let output_file = File::create(output_filename)?;
-    let mut output_zip = ZipWriter::new(output_file);
-
+    let mut archive = ZipArchive::new(File::open(filename)?)?;
+    let mut output = ZipWriter::new(File::create(output_filename)?);
     let mut entries = Vec::with_capacity(archive.len());
-    let mut body_id_list: Vec<(String, String)> = Vec::new();
+    let mut body_ids = HashMap::new();
     let mut opf_path = String::new();
-
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let mut content = Vec::new();
         file.read_to_end(&mut content)?;
-
-        let file_name = file.name()?.into_owned();
-        if is_xhtml(&file_name) {
-            if let Some(entry) = collect_body_id(&file_name, &content) {
-                body_id_list.push(entry);
+        let name = file.name()?.into_owned();
+        if is_xhtml(&name) {
+            if let Some(id) = collect_body_id(&name, content.as_slice())? {
+                body_ids.insert(name.clone(), id);
             }
         }
-
-        if file_name == "META-INF/container.xml" {
-            if let Some(path) = get_opf_filename(&content) {
-                opf_path = path;
-            }
+        if name == "META-INF/container.xml" {
+            opf_path = get_opf_filename(&content)?;
         }
-
         let options = SimpleFileOptions::default()
             .compression_method(file.compression())
             .unix_permissions(file.unix_mode().unwrap_or(0o755));
-
         entries.push(ArchiveEntry {
-            name: file_name,
+            name,
             data: content,
             options,
         });
     }
-
     let pb = ProgressBar::new(entries.len() as u64);
-    let style =
-        ProgressStyle::with_template("{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}")?;
-    pb.set_style(style);
-
+    pb.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}",
+    )?);
     for entry in entries {
-        let modified_content =
-            process_file(entry.name.as_str(), &entry.data, &body_id_list, &opf_path);
-        output_zip.start_file(entry.name, entry.options)?;
-        output_zip.write_all(&modified_content)?;
+        let repaired = process_document(
+            &entry.name,
+            &entry.data,
+            &body_ids,
+            entry.name == opf_path,
+            "en",
+        )?;
+        output.start_file(entry.name, entry.options)?;
+        output.write_all(repaired.as_deref().unwrap_or(&entry.data))?;
         pb.inc(1);
     }
-
-    output_zip.finish()?;
+    output.finish()?;
     pb.finish_with_message("done");
     Ok(())
 }
 
-fn process_file(
-    file_path: &str,
-    content: &[u8],
-    body_id_list: &[(String, String)],
-    opf_path: &str,
-) -> Vec<u8> {
-    fix_encoding(
-        file_path,
-        &fix_stray_img(
-            file_path,
-            &fix_book_language(
-                file_path,
-                &fix_body_id_link(file_path, content, body_id_list),
-                opf_path,
-            ),
-        ),
-    )
+fn is_xhtml(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("xhtml")
+        })
 }
 
-fn is_xhtml(file_path: &str) -> bool {
-    matches!(
-        Path::new(file_path).extension().and_then(|s| s.to_str()),
-        Some("html" | "xhtml")
-    )
+fn is_element(name: &OwnedName, local: &str, namespace: &str) -> bool {
+    name.local_name == local && name.namespace.as_deref().is_none_or(|ns| ns == namespace)
 }
 
-fn fix_body_id_link(file_path: &str, content: &[u8], body_id_list: &[(String, String)]) -> Vec<u8> {
-    if !is_xhtml(file_path) {
-        return content.to_vec();
-    }
-
-    let mut html = String::from_utf8_lossy(&content).to_string();
-    for (src, target) in body_id_list.iter() {
-        if html.contains(src) {
-            html = html.replace(src, target);
-        }
-    }
-    html.into_bytes()
-}
-
-fn fix_encoding(file_path: &str, content: &[u8]) -> Vec<u8> {
-    if is_xhtml(file_path) {
-        let encoding = r#"<?xml version="1.0" encoding="utf-8"?>"#;
-        let content_str = String::from_utf8_lossy(content);
-        let trimmed_html = content_str.trim_start();
-
-        // Check if the beginning of the file content starts with a partial XML declaration
-        match encoding_matcher::is_xml_declaration(trimmed_html) {
-            Ok((_, true)) => (),
-            _ => {
-                return format!("{}\n{}", encoding, trimmed_html).into_bytes();
+fn collect_body_id(path: &str, content: impl Read) -> Result<Option<String>, FixError> {
+    for event in xml_events(path, content) {
+        if let XmlEvent::StartElement {
+            name, attributes, ..
+        } = event?
+        {
+            if is_element(&name, "body", XHTML) {
+                return Ok(attributes
+                    .into_iter()
+                    .find(|attribute| {
+                        attribute.name.local_name == "id" && attribute.name.namespace.is_none()
+                    })
+                    .map(|attribute| attribute.value)
+                    .filter(|value| !value.is_empty()));
             }
         }
     }
-    content.to_vec()
+    Ok(None)
 }
 
-fn fix_stray_img(file_path: &str, content: &[u8]) -> Vec<u8> {
-    if !is_xhtml(file_path) {
-        return content.to_vec();
-    }
-
-    let html = String::from_utf8_lossy(&content).to_string();
-    let mut document = Html::parse_document(&html);
-    let selector = Selector::parse("img").unwrap();
-
-    let stray_imgs: Vec<_> = document
-        .select(&selector)
-        .filter(|img| img.value().attr("src").is_none())
-        .map(|img| img.id())
-        .collect();
-
-    if !stray_imgs.is_empty() {
-        for img in stray_imgs {
-            document.tree.get_mut(img).unwrap().detach();
+fn get_opf_filename(content: &[u8]) -> Result<String, FixError> {
+    let events = parse("META-INF/container.xml", content)?;
+    let mut candidates = Vec::new();
+    let mut in_rootfiles = false;
+    for event in events {
+        match event {
+            XmlEvent::StartElement { name, .. } if name.local_name == "rootfiles" => {
+                in_rootfiles = true
+            }
+            XmlEvent::EndElement { name } if name.local_name == "rootfiles" => in_rootfiles = false,
+            XmlEvent::StartElement {
+                name, attributes, ..
+            } if in_rootfiles && name.local_name == "rootfile" => {
+                let path = attributes.iter().find(|a| a.name.local_name == "full-path");
+                let media_type = attributes
+                    .iter()
+                    .find(|a| a.name.local_name == "media-type");
+                if let Some(path) = path {
+                    candidates.push((
+                        path.value.clone(),
+                        media_type.is_some_and(|a| a.value == "application/oebps-package+xml"),
+                    ));
+                }
+            }
+            _ => {}
         }
-        return document.html().into_bytes();
     }
-    content.to_vec()
+    candidates.sort_by_key(|(_, preferred)| !preferred);
+    candidates
+        .into_iter()
+        .next()
+        .map(|(path, _)| path)
+        .ok_or_else(|| xml_error("META-INF/container.xml", "no package document was declared"))
 }
 
-fn get_opf_filename(content: &[u8]) -> Option<String> {
-    let container_xml = Element::parse(content).ok()?;
-    container_xml
-        .get_child("rootfiles")
-        .and_then(|rf| rf.get_child("rootfile"))
-        .and_then(|rf| rf.attributes.get("full-path"))
-        .map(|path| path.to_string())
-}
-
-fn fix_book_language(file_path: &str, content: &[u8], opf_path: &str) -> Vec<u8> {
-    if opf_path.is_empty() || file_path != opf_path {
-        return content.to_vec();
+fn process_document(
+    path: &str,
+    content: &[u8],
+    body_ids: &HashMap<String, String>,
+    is_package: bool,
+    language: &str,
+) -> Result<Option<Vec<u8>>, FixError> {
+    let mut events = parse(path, content)?;
+    let mut changed = if is_package {
+        repair_language(path, &mut events, language)?
+    } else {
+        repair_xhtml(path, &mut events, body_ids)
+    };
+    // The parser decodes supported encodings without replacement characters.
+    // Any serialized document is explicitly emitted as UTF-8.
+    if let Some(XmlEvent::StartDocument { encoding, .. }) = events.first_mut() {
+        changed |= !encoding.eq_ignore_ascii_case("utf-8");
+        *encoding = "UTF-8".to_owned();
     }
-    let mut opf = match Element::parse(content) {
-        Ok(opf) => opf,
-        Err(_) => return content.to_vec(),
-    };
-
-    let Some(metadata) = opf.get_mut_child("metadata") else {
-        return content.to_vec();
-    };
-
-    let changed = fix_language(metadata);
-
+    if !is_package {
+        changed |= !content
+            .strip_prefix(b"\xef\xbb\xbf")
+            .unwrap_or(content)
+            .starts_with(b"<?xml ");
+    }
     if !changed {
-        return content.to_vec();
+        return Ok(None);
     }
-
-    let config = EmitterConfig::new()
-        .perform_indent(true)
-        .normalize_empty_elements(false);
-
-    let mut buf = BufWriter::new(Vec::new());
-    if opf.write_with_config(&mut buf, config).is_err() {
-        return content.to_vec();
+    let mut result = Vec::new();
+    {
+        let mut writer = EmitterConfig::new()
+            .autopad_comments(false)
+            .create_writer(&mut result);
+        for event in &events {
+            if let Some(event) = event.as_writer_event() {
+                writer
+                    .write(event)
+                    .map_err(|error| xml_error(path, error))?;
+            }
+        }
     }
-
-    match buf.into_inner() {
-        Ok(bytes) => bytes,
-        Err(_) => content.to_vec(),
-    }
+    Ok(Some(result))
 }
 
-fn fix_language(metadata: &mut Element) -> bool {
-    // Check if 'dc:language' exists and extract the language, if present
-    let mut language_tag = metadata.get_mut_child("language");
+fn repair_xhtml(path: &str, events: &mut Vec<XmlEvent>, bodies: &HashMap<String, String>) -> bool {
+    let mut changed = false;
+    // ZIP entry names are decoded filenames, not URI references. Escape them
+    // once at this boundary so literal %, #, and ? survive URL resolution.
+    let archive_base = encode_archive_path(path);
+    let document_base = events
+        .iter()
+        .find_map(|event| {
+            if let XmlEvent::StartElement {
+                name, attributes, ..
+            } = event
+            {
+                if is_element(name, "base", XHTML) {
+                    return attributes
+                        .iter()
+                        .find(|a| a.name.local_name == "href" && a.name.namespace.is_none())
+                        .map(|a| {
+                            resolve_local(&archive_base, &a.value)
+                                .unwrap_or_else(|| format!("external:{}", a.value))
+                        });
+                }
+            }
+            None
+        })
+        .unwrap_or(archive_base);
+    let mut bases = vec![document_base];
+    let mut skip_depth = 0;
+    events.retain_mut(|event| {
+        match event {
+            XmlEvent::StartElement {
+                name, attributes, ..
+            } => {
+                if skip_depth > 0 {
+                    skip_depth += 1;
+                    return false;
+                }
+                if is_element(name, "img", XHTML)
+                    && !attributes.iter().any(|a| {
+                        a.name.local_name == "src"
+                            && a.name.namespace.is_none()
+                            && !a.value.trim().is_empty()
+                    })
+                {
+                    skip_depth = 1;
+                    changed = true;
+                    return false;
+                }
+                let parent_base = bases.last().unwrap();
+                let base = attributes
+                    .iter()
+                    .find(|a| {
+                        a.name.local_name == "base" && a.name.namespace.as_deref() == Some(XML)
+                    })
+                    .map(|a| {
+                        resolve_local(parent_base, &a.value)
+                            .unwrap_or_else(|| format!("external:{}", a.value))
+                    })
+                    .unwrap_or_else(|| parent_base.clone());
+                if is_element(name, "a", XHTML) || is_element(name, "area", XHTML) {
+                    for attribute in attributes
+                        .iter_mut()
+                        .filter(|a| a.name.local_name == "href" && a.name.namespace.is_none())
+                    {
+                        if let Some(target) = repaired_link(&base, &attribute.value, bodies) {
+                            attribute.value = target;
+                            changed = true;
+                        }
+                    }
+                }
+                bases.push(base);
+            }
+            XmlEvent::EndElement { .. } => {
+                if skip_depth > 0 {
+                    skip_depth -= 1;
+                    return false;
+                }
+                bases.pop();
+            }
+            _ if skip_depth > 0 => return false,
+            _ => {}
+        }
+        true
+    });
+    changed
+}
 
-    let mut language = language_tag
-        .as_mut()
-        .and_then(|lt| lt.get_text().map(String::from))
-        .unwrap_or_default();
+fn encode_archive_path(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    encoded
+}
 
-    let is_valid = match LanguageTag::parse(language.as_str()) {
-        Ok(tag) => tag.validate().is_ok(),
-        Err(_) => false,
+fn decode_uri(value: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)?;
+            let low = (bytes.next()? as char).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+// Both arguments are URI paths/references; archive filenames must be escaped first.
+fn resolve_local(base: &str, reference: &str) -> Option<String> {
+    let base = base.split(['?', '#']).next()?;
+    let reference = reference.split(['?', '#']).next()?;
+    // A query value can contain a colon without making the URL external.
+    // A scheme can only occur before the first slash in the path portion.
+    let has_scheme = |path: &str| {
+        path.split('/')
+            .next()
+            .is_some_and(|part| part.contains(':'))
     };
-
-    if !is_valid {
-        println!(
-            "Language {} is not supported. Asking for a valid language.",
-            language
-        );
-        language = "en".to_string(); // TODO: replace with flag.
-    } else {
-        return false;
-    }
-
-    if language_tag.is_none() {
-        println!("Language tag is missing. {:?}", metadata);
-        let mut new_language_tag = Element::new("dc:language");
-        new_language_tag.children.clear();
-        new_language_tag
-            .children
-            .push(XMLNode::Text(language.clone()));
-        metadata.children.push(XMLNode::Element(new_language_tag));
-    } else {
-        let t = language_tag.unwrap();
-        t.children.clear();
-        t.children.push(XMLNode::Text(language.clone()));
-    }
-    true
-}
-
-fn collect_body_id(file_name: &str, content: &[u8]) -> Option<(String, String)> {
-    let html = String::from_utf8_lossy(content);
-    let document = Html::parse_document(&html);
-    let body_selector = Selector::parse("body").unwrap();
-    let body = document.select(&body_selector).next()?;
-
-    let body_id = body.value().attr("id").unwrap_or("");
-    if body_id.is_empty() {
+    if has_scheme(base) || has_scheme(reference) || reference.starts_with('/') {
         return None;
     }
+    if reference.is_empty() {
+        return Some(base.split(['?', '#']).next()?.to_owned());
+    }
+    let parent = base.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let joined = if parent.is_empty() {
+        reference.to_owned()
+    } else {
+        format!("{parent}/{reference}")
+    };
+    let mut components = Vec::new();
+    for component in joined.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            component => components.push(component),
+        }
+    }
+    let mut result = components.join("/");
+    let directory =
+        reference.ends_with('/') || matches!(reference.rsplit('/').next(), Some("." | ".."));
+    if directory && !result.is_empty() {
+        result.push('/');
+    }
+    Some(result)
+}
 
-    let fname = Path::new(file_name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let link_target = format!("{}#{}", fname, body_id);
-    Some((link_target, fname.to_string()))
+fn repaired_link(base: &str, href: &str, bodies: &HashMap<String, String>) -> Option<String> {
+    let (reference, fragment) = href.split_once('#')?;
+    let target = decode_uri(&resolve_local(base, reference)?)?;
+    if bodies.get(&target)? != &decode_uri(fragment)? {
+        return None;
+    }
+    // An empty href has inconsistent reader behavior; use an explicit self URL.
+    if reference.is_empty() {
+        Some(base.rsplit('/').next()?.to_owned())
+    } else {
+        Some(reference.to_owned())
+    }
+}
+
+fn element_end(events: &[XmlEvent], start: usize) -> usize {
+    let mut depth = 0;
+    for (offset, event) in events[start..].iter().enumerate() {
+        match event {
+            XmlEvent::StartElement { .. } => depth += 1,
+            XmlEvent::EndElement { .. } => {
+                depth -= 1;
+                if depth == 0 {
+                    return start + offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    unreachable!("parsed XML has balanced elements")
+}
+
+fn valid_language(value: &str) -> bool {
+    LanguageTag::parse(value).is_ok_and(|tag| tag.validate().is_ok())
+}
+
+fn repair_language(
+    path: &str,
+    events: &mut Vec<XmlEvent>,
+    fallback: &str,
+) -> Result<bool, FixError> {
+    let metadata_start = events
+        .iter()
+        .position(|event| {
+            matches!(event,
+                XmlEvent::StartElement { name, .. } if is_element(name, "metadata", OPF)
+            )
+        })
+        .ok_or_else(|| xml_error(path, "package metadata is missing"))?;
+    let metadata_end = element_end(events, metadata_start);
+    let mut replacements = Vec::new();
+    let mut found = false;
+    let mut i = metadata_start + 1;
+    while i < metadata_end {
+        if let XmlEvent::StartElement { name, .. } = &events[i] {
+            let end = element_end(events, i);
+            if is_element(name, "language", DC) {
+                found = true;
+                let value: String = events[i + 1..end]
+                    .iter()
+                    .filter_map(|event| match event {
+                        XmlEvent::Characters(text)
+                        | XmlEvent::Whitespace(text)
+                        | XmlEvent::CData(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if !valid_language(&value) {
+                    let replacement = if valid_language(value.trim()) {
+                        value.trim()
+                    } else {
+                        fallback
+                    };
+                    replacements.push((
+                        i + 1,
+                        end,
+                        vec![XmlEvent::Characters(replacement.to_owned())],
+                    ));
+                }
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    if !found {
+        let mut namespace = xml::namespace::Namespace::empty();
+        namespace.put("dc", DC);
+        let name = OwnedName {
+            local_name: "language".to_owned(),
+            namespace: Some(DC.to_owned()),
+            prefix: Some("dc".to_owned()),
+        };
+        replacements.push((
+            metadata_end,
+            metadata_end,
+            vec![
+                XmlEvent::StartElement {
+                    name: name.clone(),
+                    attributes: vec![],
+                    namespace,
+                },
+                XmlEvent::Characters(fallback.to_owned()),
+                XmlEvent::EndElement { name },
+            ],
+        ));
+    }
+    let changed = !replacements.is_empty();
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        events.splice(start..end, replacement);
+    }
+    Ok(changed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn process_file_works() {
-        let content = "b";
-        let result = process_file("a", content.as_bytes(), &[], "other_path");
-        assert_eq!(String::from_utf8_lossy(&result), "b");
+    fn repair(path: &str, text: &str, bodies: &[(&str, &str)]) -> Vec<u8> {
+        let bodies = bodies
+            .iter()
+            .map(|(path, id)| (path.to_string(), id.to_string()))
+            .collect();
+        let result = process_document(path, text.as_bytes(), &bodies, false, "en")
+            .unwrap()
+            .unwrap_or_else(|| text.as_bytes().to_vec());
+        parse(path, &result).expect("repaired XHTML must be valid XML");
+        result
     }
 
+    fn hrefs(content: &[u8]) -> Vec<String> {
+        parse("test.xhtml", content)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| {
+                if let XmlEvent::StartElement { attributes, .. } = event {
+                    attributes
+                        .into_iter()
+                        .find(|a| a.name.local_name == "href")
+                        .map(|a| a.value)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn image_cleanup_preserves_xml_namespaces_comments_and_cdata() {
+        let input = format!(
+            r#"<html xmlns="{XHTML}" xmlns:epub="http://www.idpf.org/2007/ops"><body><img/><!--keep--><img src="cover.png"/><span epub:type="pagebreak"/><script><![CDATA[a < b]]></script></body></html>"#
+        );
+        let output = repair("nav.xhtml", &input, &[]);
+        let events = parse("nav.xhtml", &output).unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event, XmlEvent::StartElement { name, .. } if name.local_name == "img")).count(), 1);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, XmlEvent::Comment(text) if text == "keep")));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, XmlEvent::CData(text) if text == "a < b")));
+        assert!(events.iter().any(|event| matches!(event, XmlEvent::StartElement { attributes, .. } if attributes.iter().any(|a| a.name.namespace.as_deref() == Some("http://www.idpf.org/2007/ops") && a.value == "pagebreak"))));
+    }
+
+    #[test]
+    fn links_use_full_paths_and_only_change_matching_attributes() {
+        let output = repair(
+            "nav/nav.xhtml",
+            r#"<html><body><a href="../a/chapter.xhtml#one">chapter.xhtml#one</a><a href="../b/chapter.xhtml#one"/><a href="https://example.com/a/chapter.xhtml#one"/><a href="../a/chapter.xhtml#one-extra"/><p title="../a/chapter.xhtml#one"/></body></html>"#,
+            &[("a/chapter.xhtml", "one"), ("b/chapter.xhtml", "two")],
+        );
+        assert_eq!(
+            hrefs(&output),
+            [
+                "../a/chapter.xhtml",
+                "../b/chapter.xhtml#one",
+                "https://example.com/a/chapter.xhtml#one",
+                "../a/chapter.xhtml#one-extra"
+            ]
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(">chapter.xhtml#one</a>"));
+        assert!(output.contains("title=\"../a/chapter.xhtml#one\""));
+    }
+
+    #[test]
+    fn links_support_relative_self_encoded_paths_queries_and_xml_base() {
+        let output = repair(
+            "text/nav.xhtml",
+            r##"<html><body><a href="#nav"/><a href="./ch%20one.xhtml?x=1#b%20id"/><div xml:base="../chapters/"><a href="chapter.xhtml#chapter"/></div><div xml:base="https://example.com/"><div xml:base="relative/"><a href="chapter.xhtml#chapter"/></div></div></body></html>"##,
+            &[
+                ("text/nav.xhtml", "nav"),
+                ("text/ch one.xhtml", "b id"),
+                ("chapters/chapter.xhtml", "chapter"),
+            ],
+        );
+        assert_eq!(
+            hrefs(&output),
+            [
+                "nav.xhtml",
+                "./ch%20one.xhtml?x=1",
+                "chapter.xhtml",
+                "chapter.xhtml#chapter"
+            ]
+        );
+    }
+
+    #[test]
+    fn unchanged_documents_are_byte_preserved() {
+        let content = b"<?xml version='1.0'?><html><body><img src='cover.png'/></body></html>";
+        assert!(
+            process_document("chapter.xhtml", content, &HashMap::new(), false, "en")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn repairs_are_idempotent() {
+        let output = repair(
+            "nav.xhtml",
+            "<html><body><img/><a href='chapter.xhtml#body'/></body></html>",
+            &[("chapter.xhtml", "body")],
+        );
+        let bodies = HashMap::from([("chapter.xhtml".to_string(), "body".to_string())]);
+        assert!(process_document("nav.xhtml", &output, &bodies, false, "en")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn invalid_encoding_or_xml_is_an_error() {
+        for content in [
+            b"<html><body>\xff</body></html>".as_slice(),
+            b"<?xml version='1.0' encoding='bogus'?><html/>",
+            b"<html><body><img></body></html>",
+        ] {
+            assert!(
+                process_document("chapter.xhtml", content, &HashMap::new(), false, "en").is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn utf16_is_transcoded_without_losing_characters() {
+        let text = "<?xml version='1.0' encoding='UTF-16'?><html><body>café 日本語</body></html>";
+        let mut content = vec![0xff, 0xfe];
+        content.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        let output = process_document("chapter.xhtml", &content, &HashMap::new(), false, "en")
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8(output.clone())
+            .unwrap()
+            .contains("café 日本語"));
+        parse("chapter.xhtml", &output).unwrap();
+    }
+
+    #[test]
+    fn missing_language_gets_a_bound_namespace_and_selected_fallback() {
+        let input = format!(r#"<package xmlns="{OPF}"><metadata/></package>"#);
+        let output = process_document("content.opf", input.as_bytes(), &HashMap::new(), true, "fr")
+            .unwrap()
+            .unwrap();
+        let events = parse("content.opf", &output).unwrap();
+        assert!(events.iter().any(|event| matches!(event, XmlEvent::StartElement { name, .. } if name.local_name == "language" && name.namespace.as_deref() == Some(DC))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, XmlEvent::Characters(text) if text == "fr")));
+        assert!(
+            process_document("content.opf", &output, &HashMap::new(), true, "fr")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn language_repairs_preserve_other_namespaced_metadata() {
+        let input = format!(
+            r#"<package xmlns="{OPF}" xmlns:dc="{DC}"><metadata><dc:language> fr-CA </dc:language><dc:language>invalid</dc:language><dc:title xml:lang="fr">Titre</dc:title></metadata></package>"#
+        );
+        let output = process_document("content.opf", input.as_bytes(), &HashMap::new(), true, "de")
+            .unwrap()
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(">fr-CA</dc:language>"));
+        assert!(output.contains(">de</dc:language>"));
+        assert!(output.contains("xml:lang=\"fr\""));
+    }
+
+    #[test]
+    fn package_path_prefers_the_opf_media_type() {
+        let input = br#"<container><rootfiles><rootfile full-path="other.xml"/><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        assert_eq!(get_opf_filename(input).unwrap(), "OEBPS/content.opf");
+        assert!(get_opf_filename(b"<container/>").is_err());
+        assert!(get_opf_filename(b"<container>").is_err());
+    }
+
+    #[test]
+    fn recognizes_uppercase_document_extensions() {
+        assert!(is_xhtml("text/CHAPTER.XHTML"));
+        assert!(is_xhtml("text/CHAPTER.HTML"));
+        assert!(!is_xhtml("image.png"));
+    }
+
+    #[test]
+    fn links_respect_the_document_base_url() {
+        let output = repair(
+            "nav.xhtml",
+            r#"<html><head><base href="chapters/"/></head><body><a href="chapter.xhtml#body"/></body></html>"#,
+            &[("chapters/chapter.xhtml", "body")],
+        );
+        assert_eq!(hrefs(&output), ["chapters/", "chapter.xhtml"]);
+        let output = repair(
+            "nav.xhtml",
+            r#"<html><head><base href="https://example.com/"/></head><body><a href="chapter.xhtml#body"/></body></html>"#,
+            &[("chapter.xhtml", "body")],
+        );
+        assert_eq!(
+            hrefs(&output),
+            ["https://example.com/", "chapter.xhtml#body"]
+        );
+    }
+    #[test]
+    fn xhtml_dtd_entities_are_preserved_through_repairs() {
+        let input = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>&copy; &Omega;</title></head><body id="b&alpha;"><p>A&nbsp;B &mdash; &euro;</p><img/></body></html>"#;
+        assert_eq!(
+            collect_body_id("chapter.xhtml", input.as_bytes())
+                .unwrap()
+                .as_deref(),
+            Some("bα")
+        );
+        let output = repair("chapter.xhtml", input, &[]);
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("© Ω"));
+        assert!(text.contains("A\u{a0}B — €"));
+        assert!(!text.contains("<img"));
+    }
+
+    #[test]
+    fn unknown_entities_remain_errors() {
+        assert!(parse(
+            "chapter.xhtml",
+            b"<html><body>&notAnXhtmlEntity;</body></html>"
+        )
+        .is_err());
+        assert!(parse("content.opf", b"<package>&nbsp;</package>").is_err());
+    }
+
+    #[test]
+    fn local_links_with_colons_in_queries_are_repaired() {
+        let bodies = HashMap::from([("chapter.xhtml".to_owned(), "body".to_owned())]);
+        assert_eq!(
+            repaired_link("nav.xhtml", "chapter.xhtml?value=urn:abc#body", &bodies).as_deref(),
+            Some("chapter.xhtml?value=urn:abc")
+        );
+        assert_eq!(
+            repaired_link("nav.xhtml?value=urn:abc", "chapter.xhtml#body", &bodies).as_deref(),
+            Some("chapter.xhtml")
+        );
+        assert!(repaired_link(
+            "nav.xhtml",
+            "https://example.com/chapter.xhtml?value=urn:abc#body",
+            &bodies
+        )
+        .is_none());
+        assert!(repaired_link(
+            "https://example.com/nav.xhtml",
+            "chapter.xhtml?value=urn:abc#body",
+            &bodies
+        )
+        .is_none());
+        assert_eq!(
+            resolve_local("text/nav.xhtml", "../text/dir:one/chapter.xhtml").as_deref(),
+            Some("text/dir:one/chapter.xhtml")
+        );
+    }
+    #[test]
+    fn document_entity_declarations_take_precedence_over_defaults() {
+        let input = r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd" [<!ENTITY nbsp "CUSTOM">]><html><body id="b&nbsp;"><p>A&nbsp;B &copy;</p><img/></body></html>"#;
+        assert_eq!(
+            collect_body_id("chapter.xhtml", input.as_bytes())
+                .unwrap()
+                .as_deref(),
+            Some("bCUSTOM")
+        );
+        let output = String::from_utf8(repair("chapter.xhtml", input, &[])).unwrap();
+        assert!(output.contains("ACUSTOMB ©"));
+        assert!(output.contains("id=\"bCUSTOM\""));
+    }
+    #[test]
+    fn commented_and_quoted_entity_examples_do_not_override_defaults() {
+        let input = r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd" [<!-- Example: <!ENTITY nbsp "CUSTOM"> --><?example <!ENTITY euro "CUSTOM"> ?><!ENTITY example '<!ENTITY copy "CUSTOM">'>]><html><body><p>A&nbsp;B &copy; &euro;</p><img/></body></html>"#;
+        let output = String::from_utf8(repair("chapter.xhtml", input, &[])).unwrap();
+        assert!(output.contains("A\u{a0}B © €"));
+        assert_eq!(
+            declared_entity_names(
+                r#"<!-- <!ENTITY nbsp "CUSTOM"> --><!ENTITY example '<!ENTITY copy "CUSTOM">'>"#
+            ),
+            HashSet::from(["example"])
+        );
+    }
+    #[test]
+    fn html5_only_entities_are_not_added_to_xhtml_dtds() {
+        let input = br#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><body>&NotEqualTilde;</body></html>"#;
+        assert!(parse("chapter.xhtml", input).is_err());
+    }
+    #[test]
+    fn dot_directory_bases_keep_their_directory_semantics() {
+        for base in ["chapters/.", "chapters/../chapters/.", "chapters/deep/.."] {
+            let input = format!(
+                r#"<html><body xml:base="{base}"><a href="chapter.xhtml#target"/><a href="chapter.xhtml#other"/></body></html>"#
+            );
+            let output = repair(
+                "OEBPS/nav.xhtml",
+                &input,
+                &[
+                    ("OEBPS/chapters/chapter.xhtml", "target"),
+                    ("OEBPS/chapter.xhtml", "other"),
+                ],
+            );
+            assert_eq!(
+                hrefs(&output),
+                ["chapter.xhtml", "chapter.xhtml#other"],
+                "{base}"
+            );
+        }
+        assert_eq!(resolve_local("nav.xhtml", ".").as_deref(), Some(""));
+        let output = repair(
+            "nav.xhtml",
+            r#"<html><body xml:base="."><a href="chapter.xhtml#body"/></body></html>"#,
+            &[("chapter.xhtml", "body")],
+        );
+        assert_eq!(hrefs(&output), ["chapter.xhtml"]);
+    }
+
+    #[test]
+    fn archive_path_characters_are_not_uri_delimiters_or_escape_sequences() {
+        for directory in [
+            "Part#1",
+            "Part?1",
+            "Part%1",
+            "Part%23",
+            "Part%2F",
+            "Part:1",
+            "Part café",
+        ] {
+            let nav = format!("{directory}/nav#?%.xhtml");
+            let chapter = format!("{directory}/chapter.xhtml");
+            let output = repair(
+                &nav,
+                r##"<html><body id="nav"><a href="chapter.xhtml#body"/><a href="#nav"/></body></html>"##,
+                &[(&chapter, "body"), (&nav, "nav")],
+            );
+            assert_eq!(
+                hrefs(&output),
+                ["chapter.xhtml", "nav%23%3F%25.xhtml"],
+                "{directory}"
+            );
+        }
+    }
     #[test]
     fn change_file_stem_works() {
         let original_path = Path::new("example/file.txt");
         let new_stem = "new_file";
         let new_path = change_file_stem(original_path, new_stem);
         assert_eq!(new_path.to_string_lossy(), "example/new_file.txt");
-    }
-
-    #[test]
-    fn fix_body_id_link_replaces_links_correctly() {
-        let content = b"<html><body><a href='page1#id1'>Link</a></body></html>";
-        let body_id_list = vec![("page1#id1".to_string(), "new_page1.xhtml".to_string())];
-        let result = fix_body_id_link("file.xhtml", content, &body_id_list);
-        assert_eq!(
-            String::from_utf8_lossy(&result),
-            "<html><body><a href='new_page1.xhtml'>Link</a></body></html>"
-        );
-    }
-
-    #[test]
-    fn fix_encoding_adds_xml_declaration() {
-        let content = b"<html><body>Test</body></html>";
-        let result = fix_encoding("file.xhtml", content);
-        let expected = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<html><body>Test</body></html>";
-        assert_eq!(String::from_utf8_lossy(&result), expected);
-    }
-
-    #[test]
-    fn fix_encoding_does_not_duplicate_xml_declaration() {
-        let content = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><html><body>Test</body></html>";
-        let result = fix_encoding("file.xhtml", content);
-        assert_eq!(
-            String::from_utf8_lossy(&result),
-            String::from_utf8_lossy(content)
-        );
-    }
-
-    #[test]
-    fn fix_stray_img_removes_stray_images() {
-        let content = b"<html><body><img/><img src='valid.png'/></body></html>";
-        let result = fix_stray_img("file.xhtml", content);
-
-        let result_str = String::from_utf8_lossy(&result);
-
-        let expected = "<html><head></head><body><img src=\"valid.png\"></body></html>";
-        assert_eq!(
-            result_str, expected,
-            "Unexpected output structure after removing stray images."
-        );
-    }
-
-    #[test]
-    fn get_opf_filename_extracts_correct_path() {
-        let content =
-            b"<container><rootfiles><rootfile full-path='content.opf'/></rootfiles></container>";
-        let result = get_opf_filename(content);
-        assert_eq!(result, Some("content.opf".to_string()));
-    }
-
-    #[test]
-    fn get_opf_filename_returns_none_for_invalid_container() {
-        let content = b"<container><rootfiles></container>";
-        let result = get_opf_filename(content);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn fix_book_language_updates_language() {
-        let content = b"<package xmlns=\"http://www.idpf.org/2007/opf\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:language>invalid</dc:language></metadata></package>";
-        let opf_path = "content.opf".to_string();
-        let result = fix_book_language("content.opf", content, &opf_path);
-        assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
-    }
-
-    #[test]
-    fn fix_book_language_adds_language_tag() {
-        let content = b"<package><metadata></metadata></package>";
-        let opf_path = "content.opf".to_string();
-        let result = fix_book_language("content.opf", content, &opf_path);
-        assert!(String::from_utf8_lossy(&result).contains("<dc:language>en</dc:language>"));
-    }
-
-    #[test]
-    fn fix_book_language_returns_original_on_invalid_xml() {
-        let content = b"<package><metadata>";
-        let opf_path = "content.opf".to_string();
-        let result = fix_book_language("content.opf", content, &opf_path);
-        assert_eq!(result, content);
-    }
-
-    #[test]
-    fn fix_book_language_returns_original_without_metadata() {
-        let content = b"<package></package>";
-        let opf_path = "content.opf".to_string();
-        let result = fix_book_language("content.opf", content, &opf_path);
-        assert_eq!(result, content);
-    }
-
-    #[test]
-    fn fix_language_updates_invalid_language() {
-        let mut metadata = Element::new("metadata");
-        let mut lang_tag = Element::new("language");
-        lang_tag.children.push(XMLNode::Text("invalid".to_string()));
-        metadata.children.push(XMLNode::Element(lang_tag));
-
-        let changed = fix_language(&mut metadata);
-        assert!(changed);
-        assert_eq!(
-            metadata.get_child("language").unwrap().get_text().unwrap(),
-            "en"
-        );
-    }
-
-    #[test]
-    fn fix_language_does_not_change_valid_language() {
-        let mut metadata = Element::new("metadata");
-        let mut lang_tag = Element::new("language");
-        lang_tag.children.push(XMLNode::Text("en".to_string()));
-        metadata.children.push(XMLNode::Element(lang_tag));
-
-        let changed = fix_language(&mut metadata);
-        assert!(!changed);
-        assert_eq!(
-            metadata.get_child("language").unwrap().get_text().unwrap(),
-            "en"
-        );
-    }
-
-    #[test]
-    fn fix_language_keeps_valid_bcp47_tag() {
-        let mut metadata = Element::new("metadata");
-        let mut lang_tag = Element::new("language");
-        lang_tag.children.push(XMLNode::Text("en-US".to_string()));
-        metadata.children.push(XMLNode::Element(lang_tag));
-
-        let changed = fix_language(&mut metadata);
-        assert!(!changed);
-        assert_eq!(
-            metadata.get_child("language").unwrap().get_text().unwrap(),
-            "en-US"
-        );
     }
 }

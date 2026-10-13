@@ -102,7 +102,98 @@ fn build_epub(path: &Path, nav: &[u8]) -> Result<(), Box<dyn Error>> {
 
     writer.start_file("nav.xhtml", options)?;
     writer.write_all(nav)?;
+    writer.start_file("images/cover.bin", options)?;
+    writer.write_all(&vec![0x5a; 1024 * 1024])?;
+    writer.set_comment("preserve this archive comment")?;
+
     writer.finish()?;
+    Ok(())
+}
+
+#[test]
+fn output_preserves_unchanged_entries_and_has_a_valid_mimetype() -> Result<(), Box<dyn Error>> {
+    use std::io::{Seek, SeekFrom};
+    let temp = tempdir()?;
+    let input = temp.path().join("sample.epub");
+    build_sample_epub(&input)?;
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .arg("--")
+        .arg(&input)
+        .assert()
+        .success();
+    let output = temp.path().join("sample-fixed.epub");
+    let mut before = ZipArchive::new(File::open(&input)?)?;
+    let mut after = ZipArchive::new(File::open(&output)?)?;
+    assert_eq!(before.comment(), after.comment());
+    {
+        let mut mimetype = after.by_index(0)?;
+        assert_eq!(mimetype.name()?.as_ref(), "mimetype");
+        assert_eq!(mimetype.compression(), zip::CompressionMethod::Stored);
+        assert!(mimetype.extra_data_fields().next().is_none());
+        let mut content = String::new();
+        mimetype.read_to_string(&mut content)?;
+        assert_eq!(content, "application/epub+zip");
+    }
+    for name in [
+        "chapter1.xhtml",
+        "images/cover.bin",
+        "META-INF/container.xml",
+    ] {
+        let original = before.by_name(name)?;
+        let copied = after.by_name(name)?;
+        assert_eq!(original.crc32(), copied.crc32());
+        assert_eq!(original.last_modified(), copied.last_modified());
+        assert_eq!(original.compression(), copied.compression());
+        let mut original_bytes = vec![0; original.compressed_size() as usize];
+        let mut copied_bytes = vec![0; copied.compressed_size() as usize];
+        let mut original_file = File::open(&input)?;
+        original_file.seek(SeekFrom::Start(original.data_start().unwrap()))?;
+        original_file.read_exact(&mut original_bytes)?;
+        let mut copied_file = File::open(&output)?;
+        copied_file.seek(SeekFrom::Start(copied.data_start().unwrap()))?;
+        copied_file.read_exact(&mut copied_bytes)?;
+        assert_eq!(
+            original_bytes, copied_bytes,
+            "compressed data changed for {name}"
+        );
+    }
+    for name in ["nav.xhtml", "content.opf"] {
+        let mut content = Vec::new();
+        after.by_name(name)?.read_to_end(&mut content)?;
+        for event in xml::EventReader::new(content.as_slice()) {
+            event?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_repair_does_not_create_output() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let input = temp.path().join("sample.epub");
+    build_epub(&input, b"<html><body/><unclosed>")?;
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .arg("--")
+        .arg(&input)
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read_dir(temp.path())?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn existing_output_is_protected() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let input = temp.path().join("sample.epub");
+    build_sample_epub(&input)?;
+    let output = temp.path().join("sample-fixed.epub");
+    std::fs::write(&output, b"existing output")?;
+    assert_cmd::Command::cargo_bin("fixepub")?
+        .arg("--")
+        .arg(&input)
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(&output)?, b"existing output");
     Ok(())
 }
 

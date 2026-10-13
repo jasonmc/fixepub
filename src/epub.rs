@@ -3,12 +3,13 @@ use indicatif::{ProgressBar, ProgressStyle};
 use language_tags::LanguageTag;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 use xml::name::OwnedName;
 use xml::reader::{ParserConfig, XmlEvent};
 use xml::writer::EmitterConfig;
-use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const XHTML: &str = "http://www.w3.org/1999/xhtml";
 const DC: &str = "http://purl.org/dc/elements/1.1/";
@@ -121,58 +122,102 @@ fn parse(path: &str, content: &[u8]) -> Result<Vec<XmlEvent>, FixError> {
     xml_events(path, content).collect()
 }
 
-struct ArchiveEntry {
-    name: String,
-    data: Vec<u8>,
-    options: SimpleFileOptions,
-}
-
-pub(crate) fn fix(filename: &str, output_filename: &Path) -> Result<(), FixError> {
+pub(crate) fn fix(
+    filename: &Path,
+    output_filename: &Path,
+    language: &str,
+    force: bool,
+) -> Result<(), FixError> {
+    if output_filename.exists() && !force {
+        return Err(FixError::OutputExists(output_filename.to_path_buf()));
+    }
     let mut archive = ZipArchive::new(File::open(filename)?)?;
-    let mut output = ZipWriter::new(File::create(output_filename)?);
-    let mut entries = Vec::with_capacity(archive.len());
-    let mut body_ids = HashMap::new();
-    let mut opf_path = String::new();
+    let mut names = Vec::with_capacity(archive.len());
+    let mut unique = HashSet::new();
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let mut content = Vec::new();
-        file.read_to_end(&mut content)?;
-        let name = file.name()?.into_owned();
-        if is_xhtml(&name) {
-            if let Some(id) = collect_body_id(&name, content.as_slice())? {
-                body_ids.insert(name.clone(), id);
-            }
+        let name = archive.by_index(i)?.name()?.into_owned();
+        if !unique.insert(name.clone()) {
+            return Err(xml_error(&name, "duplicate archive entry"));
         }
-        if name == "META-INF/container.xml" {
-            opf_path = get_opf_filename(&content)?;
-        }
-        let options = SimpleFileOptions::default()
-            .compression_method(file.compression())
-            .unix_permissions(file.unix_mode().unwrap_or(0o755));
-        entries.push(ArchiveEntry {
-            name,
-            data: content,
-            options,
-        });
+        names.push(name);
     }
-    let pb = ProgressBar::new(entries.len() as u64);
-    pb.set_style(ProgressStyle::with_template(
-        "{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}",
-    )?);
-    for entry in entries {
-        let repaired = process_document(
-            &entry.name,
-            &entry.data,
-            &body_ids,
-            entry.name == opf_path,
-            "en",
+
+    let mut container = Vec::new();
+    archive
+        .by_name("META-INF/container.xml")?
+        .read_to_end(&mut container)?;
+    let opf_path = get_opf_filename(&container)?;
+    if !unique.contains(&opf_path) {
+        return Err(xml_error(&opf_path, "package document is missing"));
+    }
+
+    // Only read as far as the body start tag in this pass. Images, fonts, and
+    // other binary assets are never decompressed or retained in memory.
+    let mut body_ids = HashMap::new();
+    for name in names.iter().filter(|name| is_xhtml(name)) {
+        if let Some(id) = collect_body_id(name, BufReader::new(archive.by_name(name)?))? {
+            body_ids.insert(name.clone(), id);
+        }
+    }
+
+    let parent = output_filename
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty());
+    let mut temporary = NamedTempFile::new_in(parent.unwrap_or(Path::new(".")))?;
+    {
+        let mut output = ZipWriter::new(temporary.as_file_mut());
+        output.set_raw_comment(archive.comment().into())?;
+        // EPUB's mimetype entry must be first, stored, and have no extra fields.
+        output.start_file(
+            "mimetype",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
         )?;
-        output.start_file(entry.name, entry.options)?;
-        output.write_all(repaired.as_deref().unwrap_or(&entry.data))?;
-        pb.inc(1);
+        output.write_all(b"application/epub+zip")?;
+        let pb = ProgressBar::new(names.len() as u64);
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len}",
+        )?);
+        for name in names {
+            if name != "mimetype" {
+                if is_xhtml(&name) || name == opf_path {
+                    let mut file = archive.by_name(&name)?;
+                    let options = file.options();
+                    let mut content = Vec::new();
+                    file.read_to_end(&mut content)?;
+                    drop(file);
+                    let repaired =
+                        process_document(&name, &content, &body_ids, name == opf_path, language)?;
+                    if let Some(repaired) = repaired {
+                        output.start_file(&name, options)?;
+                        output.write_all(&repaired)?;
+                    } else {
+                        output.raw_copy_file(archive.by_name(&name)?)?;
+                    }
+                } else {
+                    output.raw_copy_file(archive.by_name(&name)?)?;
+                }
+            }
+            pb.inc(1);
+        }
+        output.finish()?;
+        pb.finish_and_clear();
     }
-    output.finish()?;
-    pb.finish_with_message("done");
+    temporary.as_file().sync_all()?;
+    if force {
+        temporary
+            .persist(output_filename)
+            .map_err(|error| error.error)?;
+    } else {
+        temporary
+            .persist_noclobber(output_filename)
+            .map_err(|error| {
+                if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                    FixError::OutputExists(output_filename.to_path_buf())
+                } else {
+                    FixError::Io(error.error)
+                }
+            })?;
+    }
     Ok(())
 }
 

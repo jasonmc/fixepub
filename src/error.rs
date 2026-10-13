@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum FixError {
     #[error("invalid document {path}: {message}")]
     InvalidDocument { path: String, message: String },
+    #[error("output already exists: {0}")]
+    OutputExists(std::path::PathBuf),
     #[error("I/O error: {0}")]
     Io(std::io::Error),
     #[error("ZIP error: {0}")]

@@ -21,7 +21,7 @@ pub fn run(args: Args) -> Result<(), FixError> {
         let output_path = new_path.as_path();
 
         println!("{} ⟶ {}", filename, output_path.to_string_lossy());
-        epub::fix(&filename, output_path)?;
+        epub::fix(path, output_path, "en", false)?;
     }
     Ok(())
 }

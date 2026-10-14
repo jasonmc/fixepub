@@ -37,6 +37,11 @@ The `mimetype` entry is written first and uncompressed.
 
 ## Development
 
+Linux releases are static musl binaries for x86-64, built with Nix. They do not
+require Nix or distribution-specific shared libraries. Build one on Linux with
+`nix build .#static`; the binary is at `result/bin/fixepub`. CI runs its tests and
+checks that it starts in Alpine and Debian containers without Nix installed.
+
 ```sh
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings

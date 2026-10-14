@@ -19,7 +19,7 @@
 
         src = lib.cleanSource ./.;
 
-        fixepub = rustPlatform.buildRustPackage {
+        packageArgs = {
           pname = cargoToml.package.name;
           version = cargoToml.package.version;
           inherit src;
@@ -35,6 +35,14 @@
           ];
           strictDeps = true;
         };
+
+        fixepub = rustPlatform.buildRustPackage packageArgs;
+
+        fixepubStatic = pkgs.pkgsStatic.rustPlatform.buildRustPackage (packageArgs // {
+          doCheck = true;
+          buildInputs = [];
+          allowedReferences = [];
+        });
 
         fixepubNextest = fixepub.overrideAttrs (old: {
           pname = "${old.pname}-nextest";
@@ -52,7 +60,10 @@
           inherit fixepub fixepubNextest;
         };
 
-        packages.default = fixepub;
+        packages = { default = fixepub; }
+          // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            static = fixepubStatic;
+          };
 
         apps.default =
           (flake-utils.lib.mkApp {

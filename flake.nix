@@ -25,9 +25,10 @@
           inherit src;
           cargoLock.lockFile = ./Cargo.lock;
           doCheck = false;
+          nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs =
             [
-              # Add additional build inputs here
+              pkgs.zstd
             ]
             ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               # Additional darwin specific inputs can be set here
@@ -40,7 +41,7 @@
 
         fixepubStatic = pkgs.pkgsStatic.rustPlatform.buildRustPackage (packageArgs // {
           doCheck = true;
-          buildInputs = [];
+          buildInputs = [ pkgs.pkgsStatic.zstd ];
           allowedReferences = [];
         });
 
